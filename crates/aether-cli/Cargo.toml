@@ -33,6 +33,7 @@ base64 = "0.22"
 hex = "0.4"
 ed25519-dalek = { workspace = true }
 rand = "0.8"
+tokio-util = { workspace = true }
 
 [[bench]]
 name = "pack_bench"

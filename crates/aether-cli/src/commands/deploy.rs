@@ -11,7 +11,8 @@ use glob::Pattern;
 use std::process::Command;
 use crate::errors::{CliError, CliErrorKind};
 use serde::{Serialize,Deserialize};
-use std::io::{Read};
+use std::io::Read;
+use tokio_util::io::ReaderStream;
 
 #[derive(Debug, Clone, Copy)]
 enum PackageManager { Npm, Yarn, Pnpm }
@@ -31,8 +32,14 @@ pub async fn handle(dry_run: bool, pack_only: bool, compression_level: u32, out:
     if !is_node_project(root) { return Err(CliError::new(CliErrorKind::Usage("not a NodeJS project (missing package.json)".into())).into()); }
     if dry_run { info!(event="deploy.dry_run", msg="Would run install + prune + package project"); return Ok(()); }
 
-    let pm = detect_package_manager(root)?; // choose manager
-    if !pack_only { install_dependencies(root, pm, no_cache)?; prune_dependencies(root, pm)?; } else { info!(event="deploy.pack_only", msg="Skipping dependency install (pack-only mode)"); }
+    // Only detect and use a package manager when we actually need to install/prune.
+    if !pack_only {
+        let pm = detect_package_manager(root)?; // choose manager
+        install_dependencies(root, pm, no_cache)?;
+        prune_dependencies(root, pm)?;
+    } else {
+        info!(event="deploy.pack_only", msg="Skipping dependency install (pack-only mode) and package manager detection");
+    }
 
     let mut ignore_patterns = load_ignore_patterns(root);
     append_gitignore_patterns(root, &mut ignore_patterns);
@@ -60,7 +67,6 @@ pub async fn handle(dry_run: bool, pack_only: bool, compression_level: u32, out:
     info!(event="deploy.artifact", artifact=%artifact_name.display(), size_bytes=size, sha256=%digest, files=%manifest.total_files);
     maybe_sign(&artifact_name, &digest)?;
 
-    // upload placeholder (mock)
     if !no_upload {
         if let Ok(base) = std::env::var("AETHER_API_BASE") {
             match real_upload(&artifact_name, root, &base).await {
@@ -68,9 +74,7 @@ pub async fn handle(dry_run: bool, pack_only: bool, compression_level: u32, out:
                 Err(e)=> info!(event="deploy.upload", base=%base, artifact=%artifact_name.display(), status="error", err=%e)
             }
         } else { info!(event="deploy.upload", status="skipped_missing_env"); }
-    } else {
-        info!(event="deploy.upload", status="disabled_by_flag");
-    }
+    } else { info!(event="deploy.upload", status="disabled_by_flag"); }
     Ok(())
 }
 
@@ -243,7 +247,7 @@ fn load_patterns_file(path:PathBuf)->Vec<Pattern> {
 fn matches_patterns(p:&Path, patterns:&[Pattern])->bool { let rel:&Path = p.strip_prefix(".").unwrap_or(p); let s = rel.to_string_lossy(); patterns.iter().any(|pat| pat.matches(&s)) }
 
 #[derive(Deserialize)]
-struct PackageJson { name: Option<String>, version: Option<String> }
+struct PackageJson { name: Option<String>, version: Option<String>, #[serde(default)] dependencies: Option<serde_json::Map<String, serde_json::Value>> }
 
 fn parse_package_json(root:&Path)->Option<PackageJson> {
     let content = fs::read_to_string(root.join("package.json")).ok()?;
@@ -252,8 +256,25 @@ fn parse_package_json(root:&Path)->Option<PackageJson> {
 
 fn generate_sbom(root:&Path, artifact:&Path, manifest:&Manifest) -> Result<()> {
     let pkg = parse_package_json(root);
-    #[derive(Serialize)] struct Sbom<'a> { schema: &'a str, package: &'a Option<String>, version: &'a Option<String>, files: &'a [ManifestEntry] }
-    let sbom = Sbom { schema: "aether-sbom-v0", package: &pkg.as_ref().and_then(|p| p.name.clone()), version: &pkg.as_ref().and_then(|p| p.version.clone()), files: &manifest.files };
+    #[derive(Serialize)] struct Dependency<'a> { name: &'a str, spec: String }
+    #[derive(Serialize)] struct Sbom<'a> {
+        schema: &'a str,
+        package: Option<String>,
+        version: Option<String>,
+        total_files: usize,
+        total_size: u64,
+        manifest_digest: String,
+        files: &'a [ManifestEntry],
+        dependencies: Vec<Dependency<'a>>,
+    }
+    let mut deps = Vec::new();
+    if let Some(map) = pkg.as_ref().and_then(|p| p.dependencies.as_ref()) {
+        for (k,v) in map.iter() { if let Some(spec)=v.as_str() { deps.push(Dependency { name: k, spec: spec.to_string() }); } }
+    }
+    let mut h = Sha256::new();
+    for f in &manifest.files { h.update(f.path.as_bytes()); h.update(f.sha256.as_bytes()); }
+    let manifest_digest = format!("{:x}", h.finalize());
+    let sbom = Sbom { schema: "aether-sbom-v1", package: pkg.as_ref().and_then(|p| p.name.clone()), version: pkg.as_ref().and_then(|p| p.version.clone()), total_files: manifest.total_files, total_size: manifest.total_size, manifest_digest, files: &manifest.files, dependencies: deps };
     let path = artifact.with_file_name(format!("{}.sbom.json", artifact.file_name().and_then(|s| s.to_str()).unwrap_or("artifact")));
     fs::write(&path, serde_json::to_vec_pretty(&sbom)?)?;
     info!(event="deploy.sbom", path=%path.display(), files=manifest.total_files);
@@ -281,19 +302,27 @@ async fn real_upload(artifact:&Path, root:&Path, base:&str) -> Result<String> {
     let pkg = parse_package_json(root);
     let app_name = pkg.as_ref().and_then(|p| p.name.clone()).unwrap_or_else(|| "default-app".into());
     let client = reqwest::Client::new();
-    let bytes = fs::read(artifact)?;
-    let form = reqwest::multipart::Form::new()
-        .text("app_name", app_name.clone())
-        .part("artifact", reqwest::multipart::Part::bytes(bytes).file_name(artifact.file_name().unwrap().to_string_lossy().to_string()));
+    let meta = fs::metadata(artifact)?; let len = meta.len();
+    let file_name = artifact.file_name().unwrap().to_string_lossy().to_string();
+    let part = if len <= 512 * 1024 { // small -> buffer
+        let bytes = tokio::fs::read(artifact).await.map_err(|e| CliError::with_source(CliErrorKind::Io("read artifact".into()), e))?;
+        reqwest::multipart::Part::bytes(bytes).file_name(file_name).mime_str("application/gzip").unwrap()
+    } else {
+        let file = tokio::fs::File::open(artifact).await.map_err(|e| CliError::with_source(CliErrorKind::Io("open artifact".into()), e))?;
+        let stream = ReaderStream::new(file);
+        reqwest::multipart::Part::stream_with_length(reqwest::Body::wrap_stream(stream), len)
+            .file_name(file_name)
+            .mime_str("application/gzip").unwrap()
+    };
+    let form = reqwest::multipart::Form::new().text("app_name", app_name.clone()).part("artifact", part);
     let url = format!("{}/artifacts", base.trim_end_matches('/'));
     let resp = client.post(&url).multipart(form).send().await.map_err(|e| CliError::with_source(CliErrorKind::Runtime("upload request failed".into()), e))?;
     if !resp.status().is_success() { return Err(CliError::new(CliErrorKind::Runtime(format!("upload failed status {}", resp.status()))).into()); }
     let v: serde_json::Value = resp.json().await.map_err(|e| CliError::with_source(CliErrorKind::Runtime("invalid upload response".into()), e))?;
     let artifact_url = v.get("artifact_url").and_then(|x| x.as_str()).unwrap_or("").to_string();
-    // create deployment referencing artifact_url
     let dep_body = serde_json::json!({"app_name": app_name, "artifact_url": artifact_url});
     let dep_url = format!("{}/deployments", base.trim_end_matches('/'));
-    let _ = client.post(&dep_url).json(&dep_body).send().await; // ignore error for now
+    let _ = client.post(&dep_url).json(&dep_body).send().await; // ignore error
     Ok(artifact_url)
 }
 
