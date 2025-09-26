@@ -26,8 +26,9 @@ async fn main() -> anyhow::Result<()> {
         HTTP_REQUESTS.with_label_values(&[method.as_str(), path.as_str(), status.as_str()]).inc();
         resp
     }
+    const MAX_BODY_BYTES: usize = 1024 * 1024; // 1MB
     let app = app
-        .layer(RequestBodyLimitLayer::new(1 * 1024 * 1024))
+        .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES))
         .layer(middleware::from_fn(track_metrics));
     let addr: SocketAddr = "0.0.0.0:3000".parse()?;
     info!(%addr, "control-plane listening");
