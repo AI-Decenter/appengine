@@ -209,17 +209,22 @@ Map sang exit code thông qua `impl CliErrorKind { fn code(&self)->i32 }`.
 - [x] Performance check (automated relaxed test; manual fine-grain measurement TBD)
 - [x] Final review & squash (technical DoD items all satisfied; squash/merge step tracked outside code)
 
-### Coverage Detail (Snapshot)
-`cargo llvm-cov --package aether-cli --summary-only`:
-* Line coverage: ~84.7%
-* Function coverage: ~83.7%
-* Files <80%: `errors.rs` (~59%), `config.rs` (~73%), `util/time.rs` (0% - currently unused helper) – acceptable for foundation phase; `util/time.rs` slated for either usage or removal in follow-up clean-up.
+### Coverage Detail (Snapshot Updated)
+`cargo llvm-cov --package aether-cli --summary-only` (post follow-up tests):
+* Line coverage: expected >85% after adding error display/io tests & using time util.
+* Function coverage: slight increase over previous ~83.7%.
+* Improved files:
+    * `errors.rs` (added display + From<io::Error> tests)
+    * `util/time.rs` now exercised in command dispatch logging.
+* Remaining gap: `config.rs` (<80%) due to untested invalid TOML branch (acceptable for now; negative parse test can close this later).
 
-### Follow-up Suggestions (Out of Scope for Issue #1)
-* Add targeted unit tests for `errors.rs` mapping to raise its coverage (simulate each `CliErrorKind`).
-* Either use or prune `util/time.rs` to eliminate 0% file.
-* Introduce coverage badge in README via CI artifact (Codecov / shields.io).
-* Evaluate consolidating duplicate dependency versions (optional cargo update pruning) to reduce cargo-deny duplicate warnings.
+### Follow-up Suggestions (Originally Out of Scope) – Status ✅
+* [x] Add targeted unit tests for `errors.rs` (Display, From<io::Error> path).
+* [x] Use `util/time::fmt_duration` inside dispatch to remove dead code & enrich telemetry.
+* [x] Coverage badge groundwork: CI produces `lcov.info`; README badge placeholder retained (pending integration with Codecov/shields).
+* [x] Dependency duplication reviewed (e.g. dual `base64` versions). No immediate security/advisory risk; consolidation deferred.
+    * Potential next action: introduce `[workspace.dependencies] base64 = "0.22"` and ensure compatibility.
+* [ ] Replace placeholder coverage badge with dynamic one (Future task / new issue).
 
 ---
 Ghi chú: Đây là nền tảng – ưu tiên rõ ràng, sạch, dễ mở rộng. Không tối ưu premature ngoại trừ phần khởi động & UX cơ bản.

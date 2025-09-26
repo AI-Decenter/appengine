@@ -2,6 +2,7 @@ mod config;
 mod logging;
 mod errors;
 mod commands;
+mod util;
 
 use anyhow::Result;
 use clap::Parser;
@@ -12,6 +13,7 @@ use config::EffectiveConfig;
 use std::process;
 use std::time::Instant;
 use errors::CliError;
+use crate::util::time::fmt_duration;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -39,8 +41,10 @@ async fn dispatch(cli: Cli, _cfg: EffectiveConfig) -> Result<()> {
         Commands::Usagefail {} => { let _span = info_span!("cmd.usagefail"); commands::usagefail::handle().await }
         Commands::Runtimefail {} => { let _span = info_span!("cmd.runtimefail"); commands::runtimefail::handle().await }
     };
-    let took = start.elapsed().as_millis();
-    match &result { Ok(_) => info!(event="cmd.finished", took_ms=%took), Err(e)=> { eprintln!("error: {e}"); info!(event="cmd.failed", took_ms=%took); } }
+    let took_d = start.elapsed();
+    let took_ms = took_d.as_millis();
+    let human = fmt_duration(took_d);
+    match &result { Ok(_) => info!(event="cmd.finished", took_ms=%took_ms, took_human=%human), Err(e)=> { eprintln!("error: {e}"); info!(event="cmd.failed", took_ms=%took_ms, took_human=%human); } }
     result
 }
 
