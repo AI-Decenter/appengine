@@ -20,7 +20,7 @@ fn cli_error_display() {
 
 #[test]
 fn cli_error_from_io() {
-    let ioe = std::io::Error::new(std::io::ErrorKind::Other, "iofail");
+    let ioe = std::io::Error::other("iofail");
     let e: CliError = ioe.into();
     assert_eq!(e.kind.code(), 30);
     let s = format!("{e}");
