@@ -6,10 +6,6 @@ on:
   pull_request:
     branches: [ main ]
 
-defaults:
-  run:
-    working-directory: appengine
-
 jobs:
   build-test:
     runs-on: ubuntu-latest
@@ -26,8 +22,8 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            appengine/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('appengine/Cargo.lock') }}
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
       - name: Generate Cargo.lock (fetch dependencies)
         run: cargo fetch
       - name: Build
