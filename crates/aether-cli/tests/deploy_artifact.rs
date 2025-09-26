@@ -18,7 +18,7 @@ fn deploy_creates_artifact_and_respects_ignore() {
         .success();
     // find artifact file
     let mut artifact: Option<PathBuf> = None;
-    for e in fs::read_dir(root).unwrap() { let p = e.unwrap().path(); if p.file_name().unwrap().to_string_lossy().starts_with("app-") { artifact = Some(p); break; } }
+    for e in fs::read_dir(root).unwrap() { let p = e.unwrap().path(); eprintln!("ENTRY: {}", p.display()); if p.extension().and_then(|s| s.to_str())==Some("gz") && p.file_name().unwrap().to_string_lossy().starts_with("app-") { artifact = Some(p); break; } }
     let artifact = artifact.expect("artifact not created");
     let f = fs::File::open(&artifact).unwrap();
     let dec = GzDecoder::new(f); let mut ar = Archive::new(dec);

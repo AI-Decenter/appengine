@@ -28,6 +28,8 @@ toml = "0.8"
 whoami = "1"
 glob = "0.3"
 which = "6"
+base64 = "0.22"
+hex = "0.4"
 
 [dev-dependencies]
 assert_cmd = "2"

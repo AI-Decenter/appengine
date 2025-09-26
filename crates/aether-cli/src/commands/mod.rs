@@ -35,6 +35,14 @@ pub enum Commands {
         #[arg(long, default_value_t = false)] dry_run: bool,
         /// Chỉ đóng gói, bỏ qua bước npm install (hữu ích cho CI không có Node)
         #[arg(long, default_value_t = false)] pack_only: bool,
+        /// Mức nén gzip (1-9)
+        #[arg(long, default_value_t = 6)] compression_level: u32,
+        /// Đường dẫn output (thư mục hoặc file). Nếu là thư mục sẽ tạo tên mặc định app-<sha256>.tar.gz
+        #[arg(long)] out: Option<String>,
+        /// Bỏ qua bước upload lên Control Plane (dù có AETHER_API_BASE)
+        #[arg(long, default_value_t = false)] no_upload: bool,
+        /// Vô hiệu cache node_modules (bỏ qua restore/save)
+        #[arg(long, default_value_t = false)] no_cache: bool,
     },
     /// Mock hiển thị log gần nhất
     Logs { #[arg(long)] app: Option<String> },
