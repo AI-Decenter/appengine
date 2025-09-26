@@ -66,8 +66,6 @@ fn login_session_permissions_restrictive() {
         let session_path = tmp.path().join("aether/session.json");
         let meta = std::fs::metadata(&session_path).unwrap();
         let mode = meta.permissions().mode() & 0o777;
-        // Accept 600 or 644 depending on environment – ensure no group/other write or execute bits.
-        assert_eq!(mode & 0o022, 0, "session file should not be group/other writable: {:o}", mode);
-        assert_eq!(mode & 0o111, 0, "session file should not be executable: {:o}", mode);
+        assert_eq!(mode, 0o600, "expected session file mode 600, got {:o}", mode);
     }
 }

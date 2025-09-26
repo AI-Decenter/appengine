@@ -16,6 +16,25 @@ fn login_permission_warning_when_forced() {
 }
 
 #[test]
+fn login_permission_mode_permissive_path() {
+    #[cfg(unix)] {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let assert = bin()
+            .env("XDG_CACHE_HOME", tmp.path())
+            .env("XDG_CONFIG_HOME", tmp.path())
+            .env("AETHER_TEST_PERMISSIVE", "1")
+            .arg("login")
+            .assert();
+        let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+        let session_path = tmp.path().join("aether/session.json");
+        let mode = std::fs::metadata(&session_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o666, "expected permissive mode 666, got {:o}", mode);
+        assert!(stderr.contains("warning: session file permissions too open"));
+    }
+}
+
+#[test]
 fn config_env_override() {
     let tmp = tempfile::tempdir().unwrap();
     bin()

@@ -14,6 +14,11 @@ pub async fn handle(username: Option<String>) -> Result<()> {
             let mut perms = fs::metadata(&session_path)?.permissions();
             perms.set_mode(0o666); fs::set_permissions(&session_path, perms)?;
         }
+        else {
+            // Enforce restrictive permissions (rw-------) for session token by default.
+            let mut perms = fs::metadata(&session_path)?.permissions();
+            perms.set_mode(0o600); fs::set_permissions(&session_path, perms)?;
+        }
         let meta = fs::metadata(&session_path)?;
         if meta.permissions().mode() & 0o077 != 0 { eprintln!("warning: session file permissions too open: {:o}", meta.permissions().mode() & 0o777); }
     }
