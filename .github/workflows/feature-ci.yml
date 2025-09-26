@@ -1,0 +1,69 @@
+name: Feature CI
+
+on:
+  push:
+    branches:
+      - 'feat/**'
+      - 'feature/**'
+  pull_request:
+    branches:
+      - main
+    paths-ignore:
+      - 'README.md'
+      - 'docs/**'
+      - '.github/ISSUE_TEMPLATE/**'
+
+concurrency:
+  group: feature-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fast-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+            toolchain: 1.90.0
+            components: clippy
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+      - name: Pre-Fetch Dependencies
+        run: cargo fetch
+      - name: Clippy (fail on warnings)
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Build (debug)
+        run: cargo build --workspace --all-targets
+      - name: Run full test suite
+        run: cargo test --workspace --all-features -- --nocapture
+      - name: Focused exit code tests
+        run: cargo test -p aether-cli --test exit_codes -- --nocapture
+      - name: Upload test binary sizes (diagnostic)
+        if: always()
+        run: |
+          ls -lh target/debug/aether-cli || true
+      - name: Cargo deny (advisory + license) on feature branches
+        if: startsWith(github.ref, 'refs/heads/feat/') || startsWith(github.ref, 'refs/heads/feature/')
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      - name: Run cargo deny
+        if: steps.cargo-deny.outcome == 'success'
+        run: cargo deny check || true
+      - name: Summary
+        if: always()
+        run: |
+          echo "Feature CI completed at $(date -u)" >> $GITHUB_STEP_SUMMARY
+          echo "Rust version:" >> $GITHUB_STEP_SUMMARY
+          rustc --version >> $GITHUB_STEP_SUMMARY
