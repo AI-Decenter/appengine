@@ -1,0 +1,46 @@
+use clap::{Parser, Subcommand};
+
+pub mod login;
+pub mod deploy;
+pub mod logs;
+pub mod list;
+pub mod completions;
+pub mod netfail;
+pub mod iofail;
+
+#[derive(clap::ValueEnum, Clone, Debug)]
+pub enum LogFormat { Auto, Text, Json }
+
+#[derive(Parser, Debug)]
+#[command(name = "aether", version, about = "AetherEngine CLI (foundation)")]
+pub struct Cli {
+    /// Mức log: trace|debug|info|warn|error
+    #[arg(long, default_value = "info")]
+    pub log_level: String,
+    /// Định dạng log: auto|text|json
+    #[arg(long, default_value = "auto")]
+    pub log_format: LogFormat,
+    #[command(subcommand)]
+    pub command: Commands,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum Commands {
+    /// Đăng nhập mock và lưu token local
+    Login { #[arg(long)] username: Option<String> },
+    /// Mock deploy ứng dụng NodeJS
+    Deploy { #[arg(long, default_value_t = false)] dry_run: bool },
+    /// Mock hiển thị log gần nhất
+    Logs { #[arg(long)] app: Option<String> },
+    /// Mock liệt kê ứng dụng
+    List {},
+    /// Sinh shell completions (ẩn)
+    #[command(hide = true)]
+    Completions { #[arg(long, default_value = "bash")] shell: String },
+    /// Simulate network error (hidden, for testing exit codes)
+    #[command(hide = true)]
+    Netfail {},
+    /// Simulate IO error (hidden, for testing exit codes)
+    #[command(hide = true)]
+    Iofail {},
+}

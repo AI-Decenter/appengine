@@ -62,6 +62,50 @@ Planned Enhancements:
 * Local SBOM generation (supply chain visibility)
 * Integrity verification before runtime entrypoint execution
 
+### 3.1 Usage Quick Reference
+
+```
+$ aether --help
+Global Flags:
+	--log-level <trace|debug|info|warn|error> (default: info)
+	--log-format <auto|text|json> (default: auto)
+
+Subcommands:
+	login [--username <name>]            Authenticate (mock)
+	deploy [--dry-run]                   Package and (mock) deploy current project
+	logs [--app <name>]                  Show recent logs (mock)
+	list                                 List applications (mock)
+	completions --shell <bash|zsh|fish>  Generate shell completion script (hidden)
+```
+
+Examples:
+```
+aether login
+aether deploy --dry-run
+aether deploy
+aether --log-format json list
+aether completions --shell bash > aether.bash
+```
+
+Configuration:
+* Config file: `${XDG_CONFIG_HOME:-~/.config}/aether/config.toml`
+* Session file: `${XDG_CACHE_HOME:-~/.cache}/aether/session.json`
+* Env override: `AETHER_DEFAULT_NAMESPACE`
+* Ignore file: `.aetherignore` (glob patterns, one per line, # comments)
+
+Exit Codes:
+| Code | Meaning |
+|------|---------|
+| 0 | Success |
+| 2 | Usage / argument error (clap) |
+| 10 | Config error |
+| 20 | Runtime internal |
+| 30 | I/O error |
+| 40 | Network error (reserved) |
+
+Performance:
+Target cold start <150ms (local); CI threshold set to <800ms for noise tolerance.
+
 ---
 
 ## 4. Control Plane
