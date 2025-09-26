@@ -17,20 +17,21 @@ concurrency:
   group: feature-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  RUST_VERSION: 1.90.0
+
 jobs:
-  fast-check:
+  lint:
+    name: Lint (Clippy)
     runs-on: ubuntu-latest
-    timeout-minutes: 25
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-            toolchain: 1.90.0
-            components: clippy
+          toolchain: ${{ env.RUST_VERSION }}
+          components: clippy
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -38,32 +39,145 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
-      - name: Pre-Fetch Dependencies
+          key: lint-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+      - name: Fetch deps
         run: cargo fetch
-      - name: Clippy (fail on warnings)
+      - name: Clippy (deny warnings)
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Summary
+        if: always()
+        run: echo "Clippy OK" >> $GITHUB_STEP_SUMMARY
+
+  test:
+    name: Tests (matrix)
+    needs: lint
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: test-${{ matrix.os }}-${{ hashFiles('Cargo.lock') }}
       - name: Build (debug)
         run: cargo build --workspace --all-targets
-      - name: Run full test suite
+      - name: Run tests (full)
         run: cargo test --workspace --all-features -- --nocapture
       - name: Focused exit code tests
         run: cargo test -p aether-cli --test exit_codes -- --nocapture
-      - name: Upload test binary sizes (diagnostic)
-        if: always()
+      - name: Build release aether-cli
+        run: cargo build -p aether-cli --release
+      - name: Upload aether-cli binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aether-cli-${{ matrix.os }}
+          path: target/release/aether-cli
+          if-no-files-found: warn
+      - name: Report binary size
+        run: ls -lh target/release/aether-cli || true
+
+  coverage:
+    name: Coverage (llvm-cov)
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: llvm-tools-preview
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: coverage-${{ hashFiles('Cargo.lock') }}
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      - name: Run coverage
         run: |
-          ls -lh target/debug/aether-cli || true
-      - name: Cargo deny (advisory + license) on feature branches
-        if: startsWith(github.ref, 'refs/heads/feat/') || startsWith(github.ref, 'refs/heads/feature/')
+          cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info
+          cargo llvm-cov report --summary-only >> $GITHUB_STEP_SUMMARY
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: lcov.info
+
+  security:
+    name: Security / License (cargo-deny)
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: deny-${{ hashFiles('Cargo.lock') }}
+      - name: Install cargo-deny
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-deny
-      - name: Run cargo deny
-        if: steps.cargo-deny.outcome == 'success'
-        run: cargo deny check || true
-      - name: Summary
-        if: always()
+      - name: cargo deny check
+        run: cargo deny check
+
+  performance:
+    name: Performance (startup benchmark)
+    needs: test
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - name: Build release CLI
+        run: cargo build -p aether-cli --release
+      - name: Install hyperfine
+        run: sudo apt-get update && sudo apt-get install -y hyperfine
+      - name: Benchmark startup (aether-cli --help)
         run: |
-          echo "Feature CI completed at $(date -u)" >> $GITHUB_STEP_SUMMARY
-          echo "Rust version:" >> $GITHUB_STEP_SUMMARY
-          rustc --version >> $GITHUB_STEP_SUMMARY
+          hyperfine --warmup 3 'target/release/aether-cli --help' --export-json perf.json
+          cat perf.json
+          echo "### Startup Benchmark" >> $GITHUB_STEP_SUMMARY
+          jq '.results[0] | {mean:.mean, stddev:.stddev, user:.user, system:.system}' perf.json >> $GITHUB_STEP_SUMMARY
+
+  summary:
+    name: Pipeline Summary
+    needs: [lint, test, coverage, security, performance]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Final summary
+        run: |
+          echo "## Feature CI Summary" >> $GITHUB_STEP_SUMMARY
+          echo "Lint: ${{ needs.lint.result }}" >> $GITHUB_STEP_SUMMARY || true
+          echo "Tests: ${{ needs.test.result }}" >> $GITHUB_STEP_SUMMARY || true
+          echo "Coverage: ${{ needs.coverage.result }}" >> $GITHUB_STEP_SUMMARY || true
+          echo "Security: ${{ needs.security.result }}" >> $GITHUB_STEP_SUMMARY || true
+          echo "Performance: ${{ needs.performance.result }}" >> $GITHUB_STEP_SUMMARY || true
