@@ -174,6 +174,7 @@ Phần còn lại (để lại cho issue khác / future enhancements – đã lo
 - Graceful shutdown cơ bản (Ctrl+C -> delay 200ms để drain).
 - AppState.db chuyển sang bắt buộc (không còn `Option`).
 - Service layer bước đầu (`services::apps`, `services::deployments`) tách logic DB khỏi handler.
+ - Security: Nâng cấp `prometheus` -> 0.14 (kéo `protobuf` 3.7.2) vá CVE/RUSTSEC-2024-0437 (stack overflow do recursion parsing) – ghi chú thêm trong `CHANGELOG.md`.
 
 ### 8. Tổng quan OpenAPI & Metrics (Hiện trạng)
 **OpenAPI**:
