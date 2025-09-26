@@ -9,6 +9,16 @@ on:
 jobs:
   build-test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_DB: aether_dev
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust toolchain
@@ -24,20 +34,38 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+      - name: Wait for Postgres
+        run: |
+          for i in {1..30}; do
+            pg_isready -h 127.0.0.1 -U postgres && break
+            sleep 1
+          done
+      - name: Install sqlx-cli
+        run: cargo install sqlx-cli --no-default-features --features native-tls,postgres
       - name: Generate Cargo.lock (fetch dependencies)
         run: cargo fetch
+      - name: Run migrations
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/aether_dev
+        working-directory: crates/control-plane
+        run: sqlx migrate run
       - name: Build
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/aether_dev
         run: cargo build --workspace --all-targets --release
       - name: Clippy
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/aether_dev
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: SQLx Prepare (Offline)
         env:
-          DATABASE_URL: postgres://aether:postgres@localhost:5432/aether_dev
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/aether_dev
         run: |
           sudo apt-get update && sudo apt-get install -y postgresql-client
-          # In CI a real DB could be started via service container; placeholder here.
-          echo '{"db":[]}' > sqlx-data.json || true
+          cargo sqlx prepare --workspace -- --all-targets
       - name: Tests
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/aether_dev
         run: cargo test --workspace --all-features -- --nocapture
       - name: Install cargo-deny
         uses: taiki-e/install-action@v2
