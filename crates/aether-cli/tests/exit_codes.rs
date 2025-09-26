@@ -5,10 +5,12 @@ fn bin() -> Command { Command::cargo_bin("aether-cli").unwrap() }
 #[test]
 fn network_error_exit_code() {
     let tmp = tempfile::tempdir().unwrap();
-    let mut cmd = bin();
-    cmd.env("XDG_CACHE_HOME", tmp.path());
-    cmd.env("XDG_CONFIG_HOME", tmp.path());
-    let assert = cmd.arg("netfail").assert().failure();
+    let assert = bin()
+        .env("XDG_CACHE_HOME", tmp.path())
+        .env("XDG_CONFIG_HOME", tmp.path())
+        .arg("netfail")
+        .assert()
+        .failure();
     let code = assert.get_output().status.code().unwrap();
     assert_eq!(code, 40, "expected network error exit code 40, got {code}");
 }
@@ -23,21 +25,39 @@ fn usage_error_bad_subcommand() {
 
 #[test]
 fn io_error_simulated_via_command() {
-    let assert = bin().arg("iofail").assert().failure();
+    let tmp = tempfile::tempdir().unwrap();
+    let assert = bin()
+        .env("XDG_CACHE_HOME", tmp.path())
+        .env("XDG_CONFIG_HOME", tmp.path())
+        .arg("iofail")
+        .assert()
+        .failure();
     let code = assert.get_output().status.code().unwrap();
     assert_eq!(code, 30, "expected IO exit code 30, got {code}");
 }
 
 #[test]
 fn usage_error_simulated_via_command() {
-    let assert = bin().arg("usagefail").assert().failure();
+    let tmp = tempfile::tempdir().unwrap();
+    let assert = bin()
+        .env("XDG_CACHE_HOME", tmp.path())
+        .env("XDG_CONFIG_HOME", tmp.path())
+        .arg("usagefail")
+        .assert()
+        .failure();
     let code = assert.get_output().status.code().unwrap();
     assert_eq!(code, 2, "expected usage exit code 2, got {code}");
 }
 
 #[test]
 fn runtime_error_simulated_via_command() {
-    let assert = bin().arg("runtimefail").assert().failure();
+    let tmp = tempfile::tempdir().unwrap();
+    let assert = bin()
+        .env("XDG_CACHE_HOME", tmp.path())
+        .env("XDG_CONFIG_HOME", tmp.path())
+        .arg("runtimefail")
+        .assert()
+        .failure();
     let code = assert.get_output().status.code().unwrap();
     assert_eq!(code, 20, "expected runtime exit code 20, got {code}");
 }

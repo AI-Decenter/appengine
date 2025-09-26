@@ -5,10 +5,12 @@ fn bin()->Command { Command::cargo_bin("aether-cli").unwrap() }
 #[test]
 fn login_permission_warning_when_forced() {
     let tmp = tempfile::tempdir().unwrap();
-    std::env::set_var("XDG_CACHE_HOME", tmp.path());
-    std::env::set_var("XDG_CONFIG_HOME", tmp.path());
-    std::env::set_var("AETHER_TEST_PERMISSIVE", "1");
-    let assert = bin().arg("login").assert();
+    let assert = bin()
+        .env("XDG_CACHE_HOME", tmp.path())
+        .env("XDG_CONFIG_HOME", tmp.path())
+        .env("AETHER_TEST_PERMISSIVE", "1")
+        .arg("login")
+        .assert();
     let out = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
     assert!(out.contains("warning: session file permissions too open"));
 }
@@ -16,20 +18,24 @@ fn login_permission_warning_when_forced() {
 #[test]
 fn config_env_override() {
     let tmp = tempfile::tempdir().unwrap();
-    std::env::set_var("XDG_CACHE_HOME", tmp.path());
-    std::env::set_var("XDG_CONFIG_HOME", tmp.path());
-    std::env::set_var("AETHER_DEFAULT_NAMESPACE", "ns-override");
-    // Use a harmless command
-    bin().args(["list"]).assert().success();
+    bin()
+        .env("XDG_CACHE_HOME", tmp.path())
+        .env("XDG_CONFIG_HOME", tmp.path())
+        .env("AETHER_DEFAULT_NAMESPACE", "ns-override")
+        .args(["list"]) 
+        .assert()
+        .success();
     // No direct output yet; placeholder ensures no crash with env override.
 }
 
 #[test]
 fn json_log_format_outputs_json() {
     let tmp = tempfile::tempdir().unwrap();
-    std::env::set_var("XDG_CACHE_HOME", tmp.path());
-    std::env::set_var("XDG_CONFIG_HOME", tmp.path());
-    let assert = bin().args(["--log-format","json","list"]).assert();
+    let assert = bin()
+        .env("XDG_CACHE_HOME", tmp.path())
+        .env("XDG_CONFIG_HOME", tmp.path())
+        .args(["--log-format","json","list"])
+        .assert();
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     let first_line = stdout.lines().next().unwrap_or("");
     // tolerate empty (some logs go to stderr); just skip if empty

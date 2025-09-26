@@ -12,9 +12,12 @@ fn version_works() { bin().arg("--version").assert().success(); }
 #[test]
 fn login_creates_session() {
     let tmp = tempfile::tempdir().unwrap();
-    std::env::set_var("XDG_CACHE_HOME", tmp.path());
-    std::env::set_var("XDG_CONFIG_HOME", tmp.path());
-    bin().arg("login").assert().success();
+    let mut cmd = bin();
+    cmd.env("XDG_CACHE_HOME", tmp.path())
+        .env("XDG_CONFIG_HOME", tmp.path())
+        .arg("login")
+        .assert()
+        .success();
     // session file existence (best effort path)
     let session_glob = tmp.path().join("aether/session.json");
     assert!(session_glob.exists());
@@ -25,11 +28,15 @@ fn login_creates_session() {
 #[test]
 fn deploy_dry_run() {
     let tmp = tempfile::tempdir().unwrap();
-    std::env::set_var("XDG_CACHE_HOME", tmp.path());
-    std::env::set_var("XDG_CONFIG_HOME", tmp.path());
-    // create a minimal NodeJS project marker
-    fs::write("package.json", "{}" ).unwrap();
-    bin().args(["deploy","--dry-run"]).assert().success();
+    // create a minimal NodeJS project marker inside temp dir
+    fs::write(tmp.path().join("package.json"), "{}" ).unwrap();
+    let mut cmd = bin();
+    cmd.current_dir(tmp.path())
+        .env("XDG_CACHE_HOME", tmp.path())
+        .env("XDG_CONFIG_HOME", tmp.path())
+        .args(["deploy","--dry-run"]) 
+        .assert()
+        .success();
 }
 
 #[test]

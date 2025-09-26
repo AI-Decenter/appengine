@@ -5,14 +5,17 @@ fn bin()->Command { Command::cargo_bin("aether-cli").unwrap() }
 #[test]
 fn deploy_creates_artifact_and_respects_ignore() {
     let tmp = tempfile::tempdir().unwrap();
-    std::env::set_var("XDG_CACHE_HOME", tmp.path());
-    std::env::set_var("XDG_CONFIG_HOME", tmp.path());
     let root = tmp.path();
     fs::write(root.join("package.json"), "{}").unwrap();
     fs::write(root.join("include.txt"), "hello").unwrap();
     fs::write(root.join("secret.env"), "PASSWORD=123").unwrap();
     fs::write(root.join(".aetherignore"), "secret.env\n").unwrap();
-    bin().current_dir(root).args(["deploy"]).assert().success();
+    bin().current_dir(root)
+        .env("XDG_CACHE_HOME", tmp.path())
+        .env("XDG_CONFIG_HOME", tmp.path())
+        .args(["deploy"]) 
+        .assert()
+        .success();
     // find artifact file
     let mut artifact: Option<PathBuf> = None;
     for e in fs::read_dir(root).unwrap() { let p = e.unwrap().path(); if p.file_name().unwrap().to_string_lossy().starts_with("artifact-") { artifact = Some(p); break; } }
