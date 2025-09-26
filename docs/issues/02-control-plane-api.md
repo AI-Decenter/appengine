@@ -179,8 +179,8 @@ Phần còn lại (để lại cho issue khác / future enhancements – đã lo
 ### 8. Tổng quan OpenAPI & Metrics (Hiện trạng)
 **OpenAPI**:
 - Bao phủ các route: /health, /readyz, /apps (POST/GET), /apps/{app_name}/deployments, /apps/{app_name}/logs, /deployments (POST/GET).
-- Schemas đã derive (`ToSchema`) cho: CreateAppReq/Resp, ListAppItem, CreateDeploymentRequest/Response, DeploymentItem, AppDeploymentItem, HealthResponse.
-- Chưa: mô tả error schema chung, chuẩn hoá các mã HTTP lỗi trong spec (kế hoạch thêm `ApiError`).
+- Schemas đã derive (`ToSchema`) cho: CreateAppReq/Resp, ListAppItem, CreateDeploymentRequest/Response, DeploymentItem, AppDeploymentItem, HealthResponse, ApiErrorBody (đÃ THÊM component schema).
+- Chưa: tham chiếu error schema ở từng responses 4xx/5xx (sẽ bổ sung), chuẩn hoá liệt kê mã lỗi cụ thể per endpoint.
 
 **Swagger UI**:
 - Trang HTML đơn giản (CDN) tại `/swagger` -> tải spec từ `/openapi.json`.
@@ -188,22 +188,24 @@ Phần còn lại (để lại cho issue khác / future enhancements – đã lo
 
 **Metrics**:
 - `/metrics` xuất Prometheus text format.
-- Counter `HTTP_REQUESTS` với 3 label: method, raw_path, status.
-- Kế hoạch cải tiến: chuẩn hoá path (biến tham số -> token), thêm histogram latency (p95/p99), phân tách lỗi / success.
+- Counter `HTTP_REQUESTS` với 3 label: method, normalized_path, status.
+- Histogram `HTTP_REQUEST_DURATION_SECONDS` (labels: method, normalized_path) đã thêm để quan sát latency.
+- Đã có bước đầu path normalization (apps/:app_name/*). 
+- Kế hoạch tiếp: mở rộng normalization cho mọi tham số (`/deployments/{id}`), thêm gauge connection pool usage, phân tách counter success/error riêng hoặc thêm label outcome.
 
-### 9. Next Steps (Đề xuất follow-up)
-1. OpenAPI nâng cao: thêm `ApiError` vào components + tham chiếu ở responses 4xx/5xx.
-2. Metrics nâng cao: histogram thời gian xử lý, path template hoá, gauge connection pool usage.
-3. Readiness nâng cao: thực hiện `SELECT 1`, kiểm tra migrations đã chạy; có thể thêm `/startupz`.
-4. Hoàn thiện service layer: di chuyển truy vấn còn lại từ handler (`app_deployments`) vào `services`.
-5. Pagination & filters: cho list apps & deployments (limit/offset hoặc cursor).
-6. Auth/RBAC nhẹ: header token static + role mapping (chuẩn bị cho multi-tenant).
-7. Timeout & cancelation: thêm `tower-http` timeout layer + request id propagation.
-8. Normalized logging: thêm request_id (UUID v7) + correlation in traces.
-9. Client SDK: generate TypeScript (openapi-typescript) + Rust client stub.
-10. Deployment events: bảng events + publish hook (Kafka/NATS tương lai).
-11. Security hardening: rate limit, optional CORS whitelist, SQLx TLS.
-12. Fuzz / property tests: payload fuzzing cho create endpoints.
+### 9. Next Steps (Đề xuất follow-up / cập nhật trạng thái)
+1. OpenAPI nâng cao: THÊM error component (DONE) + (TODO) tham chiếu ở responses 4xx/5xx chuẩn hoá.
+2. Metrics nâng cao: histogram + path normalization (DONE phần cơ bản) → (TODO) mở rộng normalization toàn bộ, thêm pool usage gauge, outcome label.
+3. Readiness nâng cao: DB connectivity check (DONE) → (TODO) migrations pending + endpoint `/startupz`.
+4. Hoàn thiện service layer: Di chuyển `app_deployments` (DONE) – rà soát còn truy vấn inline khác (nếu có) → (TODO) unify.
+5. Pagination & filters: list apps & deployments (DONE) → (TODO) thêm pagination cho app_deployments & future cursor mode.
+6. Auth/RBAC nhẹ: (TODO) static token header + role mapping.
+7. Timeout & cancelation: (TODO) timeout layer + request id.
+8. Normalized logging: (TODO) request_id (UUID v7) + trace correlation.
+9. Client SDK: (TODO) generate TypeScript + Rust stub.
+10. Deployment events: (TODO) events table + hook publisher abstraction.
+11. Security hardening: (TODO) rate limit, CORS whitelist, SQLx TLS.
+12. Fuzz / property tests: (TODO) fuzz create & list endpoints.
 
 ### 10. Snapshot Trạng Thái Hiện Tại (Checklist Nhanh)
 | Hạng mục | Trạng thái |
@@ -220,13 +222,13 @@ Phần còn lại (để lại cho issue khác / future enhancements – đã lo
 | Service layer (partial) | ✅ (còn 1 truy vấn inline) |
 | Offline sqlx prepare | ✅ |
 | CI Postgres + macOS split | ✅ |
-| Histogram latency | ❌ (planned) |
-| Error schema OpenAPI | ❌ (planned) |
+| Histogram latency | ✅ (basic histogram added) |
+| Error schema OpenAPI component | ✅ (component only; responses pending) |
 | Auth/RBAC | ❌ |
 | Rate limiting | ❌ |
 | Timeout layer | ❌ |
-| Path normalization metrics | ❌ |
-| Pagination | ❌ |
+| Path normalization metrics | ✅ (partial) |
+| Pagination | ✅ (apps, deployments) |
 | Events bus | ❌ |
 | Client SDK | ❌ |
 

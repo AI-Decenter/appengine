@@ -1,8 +1,7 @@
-use axum::{Json, extract::{Path, State}};
+use axum::{Json, extract::{Path, State, Query}};
 use serde::{Serialize, Deserialize};
 use utoipa::ToSchema;
 use crate::{AppState, models::Application, error::{ApiError, ApiResult}, services};
-use sqlx::Row;
 use axum::http::StatusCode;
 
 #[derive(Deserialize, ToSchema)]
@@ -26,11 +25,18 @@ pub async fn create_app(State(state): State<AppState>, Json(body): Json<CreateAp
 #[derive(Serialize, ToSchema)]
 pub struct ListAppItem { pub id: uuid::Uuid, pub name: String }
 
-/// List applications
-#[utoipa::path(get, path = "/apps", responses( (status = 200, body = [ListAppItem]) ))]
-#[tracing::instrument(level="debug", skip(state))]
-pub async fn list_apps(State(state): State<AppState>) -> ApiResult<Json<Vec<ListAppItem>>> {
-    let rows: Vec<Application> = services::apps::list_apps(&state.db).await.map_err(|e| ApiError::internal(format!("query error: {e}")))?;
+#[derive(Deserialize, ToSchema)]
+pub struct AppsListQuery { pub limit: Option<i64>, pub offset: Option<i64> }
+
+/// List applications (paginated)
+#[utoipa::path(get, path = "/apps", params( ("limit" = Option<i64>, Query, description="Max items (default 100, max 1000)"), ("offset" = Option<i64>, Query, description="Offset for pagination")), responses( (status = 200, body = [ListAppItem]) ))]
+#[tracing::instrument(level="debug", skip(state, q), fields(limit=?q.limit, offset=?q.offset))]
+pub async fn list_apps(State(state): State<AppState>, Query(q): Query<AppsListQuery>) -> ApiResult<Json<Vec<ListAppItem>>> {
+    let limit = q.limit.unwrap_or(100).clamp(1, 1000);
+    let offset = q.offset.unwrap_or(0).max(0);
+    let rows: Vec<Application> = sqlx::query_as::<_, Application>("SELECT id, name, created_at, updated_at FROM applications ORDER BY created_at DESC LIMIT $1 OFFSET $2")
+        .bind(limit).bind(offset)
+        .fetch_all(&state.db).await.map_err(|e| ApiError::internal(format!("query error: {e}")))?;
     Ok(Json(rows.into_iter().map(|a| ListAppItem { id: a.id, name: a.name }).collect()))
 }
 
@@ -38,7 +44,6 @@ pub async fn list_apps(State(state): State<AppState>) -> ApiResult<Json<Vec<List
 #[utoipa::path(get, path = "/apps/{app_name}/logs", params( ("app_name" = String, Path, description = "Application name") ), responses( (status=200, description="OK") ))]
 pub async fn app_logs(Path(_app_name): Path<String>) -> (StatusCode, String) { (StatusCode::OK, String::new()) }
 
-use crate::models::Deployment;
 #[derive(serde::Serialize, ToSchema)]
 pub struct AppDeploymentItem { pub id: uuid::Uuid, pub artifact_url: String, pub status: String }
 
@@ -46,13 +51,13 @@ pub struct AppDeploymentItem { pub id: uuid::Uuid, pub artifact_url: String, pub
 #[utoipa::path(get, path = "/apps/{app_name}/deployments", params( ("app_name" = String, Path, description = "Application name") ), responses( (status=200, body = [AppDeploymentItem]) ))]
 #[tracing::instrument(level="debug", skip(state, app_name), fields(app_name=%app_name))]
 pub async fn app_deployments(State(state): State<AppState>, Path(app_name): Path<String>) -> ApiResult<Json<Vec<AppDeploymentItem>>> {
-    let pool = &state.db;
-    // resolve app id
-    let app_row = sqlx::query("SELECT id FROM applications WHERE name = $1").bind(&app_name).fetch_optional(pool).await
-        .map_err(|e| ApiError::internal(format!("lookup error: {e}")))?;
-    let app_id: uuid::Uuid = match app_row { Some(r) => r.get("id"), None => return Err(ApiError::not_found("application not found")) };
-    let rows: Vec<Deployment> = sqlx::query_as::<_, Deployment>("SELECT id, app_id, artifact_url, status, created_at FROM deployments WHERE app_id = $1 ORDER BY created_at DESC")
-        .bind(app_id)
-        .fetch_all(pool).await.map_err(|e| ApiError::internal(format!("query error: {e}")))?;
+    let rows = services::deployments::list_for_app(&state.db, &app_name, 100, 0)
+        .await.map_err(|e| ApiError::internal(format!("query error: {e}")))?;
+    if rows.is_empty() {
+        // Distinguish between no app and app with zero deployments: check existence
+        let exists = sqlx::query_scalar::<_, i64>("SELECT COUNT(1) FROM applications WHERE name = $1")
+            .bind(&app_name).fetch_one(&state.db).await.map_err(|e| ApiError::internal(format!("lookup error: {e}")))?;
+        if exists == 0 { return Err(ApiError::not_found("application not found")); }
+    }
     Ok(Json(rows.into_iter().map(|d| AppDeploymentItem { id: d.id, artifact_url: d.artifact_url, status: d.status }).collect()))
 }

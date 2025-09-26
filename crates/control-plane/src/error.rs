@@ -1,8 +1,9 @@
 use axum::{response::{IntoResponse, Response}, Json, http::StatusCode};
 use serde::Serialize;
+use utoipa::ToSchema;
 use std::fmt::{Display, Formatter};
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct ApiErrorBody { pub code: &'static str, pub message: String }
 
 #[derive(Debug, Clone)]

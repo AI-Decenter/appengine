@@ -26,6 +26,7 @@ pub struct AppState { pub db: Pool<Postgres> }
         handlers::deployments::create_deployment,
         handlers::deployments::list_deployments,
     ),
+    components(schemas(error::ApiErrorBody)),
     tags( (name = "aether", description = "Aether Control Plane API") )
 )]
 pub struct ApiDoc;

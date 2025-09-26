@@ -4,7 +4,7 @@ use tracing::info;
 use std::net::SocketAddr;
 use axum::{http::Request, middleware::{self, Next}, response::Response, body::Body};
 use tower_http::limit::RequestBodyLimitLayer;
-use control_plane::telemetry::HTTP_REQUESTS;
+use control_plane::telemetry::{HTTP_REQUESTS, HTTP_REQUEST_DURATION, normalize_path};
 use std::time::Duration;
 
 #[tokio::main]
@@ -20,10 +20,14 @@ async fn main() -> anyhow::Result<()> {
     let app = build_router(state);
     async fn track_metrics(req: Request<Body>, next: Next) -> Response {
         let method = req.method().clone();
-        let path = req.uri().path().to_string();
+        let raw_path = req.uri().path().to_string();
+        let path_label = normalize_path(&raw_path);
+        let start = std::time::Instant::now();
         let resp = next.run(req).await;
         let status = resp.status().as_u16().to_string();
-        HTTP_REQUESTS.with_label_values(&[method.as_str(), path.as_str(), status.as_str()]).inc();
+        HTTP_REQUESTS.with_label_values(&[method.as_str(), path_label.as_str(), status.as_str()]).inc();
+        let elapsed = start.elapsed().as_secs_f64();
+        HTTP_REQUEST_DURATION.with_label_values(&[method.as_str(), path_label.as_str()]).observe(elapsed);
         resp
     }
     const MAX_BODY_BYTES: usize = 1024 * 1024; // 1MB

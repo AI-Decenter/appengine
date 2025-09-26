@@ -1,5 +1,20 @@
 use sqlx::{Pool, Postgres};
 use crate::models::Deployment;
+
+pub async fn list_for_app(pool: &Pool<Postgres>, app_name: &str, limit: i64, offset: i64) -> anyhow::Result<Vec<Deployment>> {
+    let app_row = sqlx::query("SELECT id FROM applications WHERE name = $1")
+        .bind(app_name)
+        .fetch_optional(pool)
+        .await?;
+    let app_id: uuid::Uuid = match app_row { Some(r) => r.get("id"), None => return Ok(Vec::new()) };
+    let rows = sqlx::query_as::<_, Deployment>("SELECT id, app_id, artifact_url, status, created_at FROM deployments WHERE app_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3")
+        .bind(app_id)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(pool)
+        .await?;
+    Ok(rows)
+}
 use sqlx::Row;
 
 pub async fn create_deployment(pool: &Pool<Postgres>, app_name: &str, artifact_url: &str) -> Result<Deployment, sqlx::Error> {
