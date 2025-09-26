@@ -1,6 +1,6 @@
 use sqlx::{Pool, Postgres};
 use std::time::Duration;
-use tracing::{info, error};
+use tracing::info;
 
 pub async fn init_db(database_url: &str) -> anyhow::Result<Pool<Postgres>> {
     let pool = sqlx::postgres::PgPoolOptions::new()
@@ -8,6 +8,7 @@ pub async fn init_db(database_url: &str) -> anyhow::Result<Pool<Postgres>> {
         .acquire_timeout(Duration::from_secs(3))
         .connect(database_url)
         .await?;
-    if let Err(e) = sqlx::migrate!().run(&pool).await { error!(error=%e, "migration failure"); } else { info!("migrations applied (if any)"); }
+        sqlx::migrate!().run(&pool).await?;
+    info!("migrations applied");
     Ok(pool)
 }
