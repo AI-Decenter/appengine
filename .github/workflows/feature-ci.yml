@@ -87,7 +87,8 @@ jobs:
       - name: Run migrations
         env:
           DATABASE_URL: postgres://postgres:postgres@localhost:5432/aether_dev
-        run: sqlx migrate run -p crates/control-plane
+        working-directory: crates/control-plane
+        run: sqlx migrate run
       - name: Build (debug)
         env:
           DATABASE_URL: postgres://postgres:postgres@localhost:5432/aether_dev

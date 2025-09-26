@@ -18,10 +18,7 @@ jobs:
           POSTGRES_DB: aether_dev
         ports: ["5432:5432"]
         options: >-
-          --health-cmd "pg_isready -U postgres" \
-          --health-interval 5s \
-          --health-timeout 5s \
-          --health-retries 10
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
     env:
       RUST_VERSION: 1.90.0
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/aether_dev
@@ -42,7 +39,8 @@ jobs:
       - name: Install sqlx-cli
         run: cargo install sqlx-cli --no-default-features --features native-tls,postgres
       - name: Run migrations
-        run: sqlx migrate run -p crates/control-plane
+        working-directory: crates/control-plane
+        run: sqlx migrate run
       - name: Prepare offline data
         run: cargo sqlx prepare --workspace -- --all-targets
       - name: Verify sqlx-data.json committed
