@@ -1,5 +1,7 @@
 # AetherEngine (MVP v1.0)
 
+![Coverage](https://img.shields.io/badge/coverage-pending-lightgrey)
+
 An internal Platform-as-a-Service (PaaS) designed to minimize application deployment latency and systematically elevate Developer Experience (DX) by transferring the entirety of the build pipeline (dependency resolution, compilation, packaging) to the client edge through a high‑performance Rust CLI. Rather than executing non‑deterministic server‑side builds, developers upload a pre‑assembled, production‑ready artifact. This model is intended to reduce end‑to‑end deployment latency from minutes to seconds while decreasing infrastructure consumption and variance.
 
 ---

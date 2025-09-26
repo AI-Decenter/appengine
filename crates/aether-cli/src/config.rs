@@ -35,6 +35,8 @@ impl EffectiveConfig {
     }
 }
 
+// (Test helper previously existed here; removed to avoid widening public surface.)
+
 pub fn config_dir() -> PathBuf {
     if let Some(p) = std::env::var_os("XDG_CONFIG_HOME") { PathBuf::from(p).join("aether") }
     else { dirs::config_dir().unwrap_or_else(|| PathBuf::from(".")) .join("aether") }
@@ -43,5 +45,8 @@ pub fn cache_dir() -> PathBuf {
     if let Some(p) = std::env::var_os("XDG_CACHE_HOME") { PathBuf::from(p).join("aether") }
     else { dirs::cache_dir().unwrap_or_else(|| PathBuf::from(".")) .join("aether") }
 }
-pub fn config_file_path() -> PathBuf { config_dir().join("config.toml") }
+pub fn config_file_path() -> PathBuf {
+    if let Ok(p) = std::env::var("AETHER_CONFIG_FILE") { return PathBuf::from(p); }
+    config_dir().join("config.toml")
+}
 pub fn session_file_path() -> PathBuf { cache_dir().join("session.json") }

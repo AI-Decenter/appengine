@@ -41,16 +41,28 @@ fn deploy_dry_run() {
 }
 
 #[test]
-fn logs_mock() { bin().args(["logs"]).assert().success(); }
+fn logs_mock() {
+    let tmp = tempfile::tempdir().unwrap();
+    bin().env("XDG_CONFIG_HOME", tmp.path()).env("XDG_CACHE_HOME", tmp.path()).args(["logs"]).assert().success();
+}
 
 #[test]
-fn list_mock() { bin().args(["list"]).assert().success(); }
+fn list_mock() {
+    let tmp = tempfile::tempdir().unwrap();
+    bin().env("XDG_CONFIG_HOME", tmp.path()).env("XDG_CACHE_HOME", tmp.path()).args(["list"]).assert().success();
+}
 
 #[test]
-fn completions_bash() { bin().args(["completions","--shell","bash"]).assert().success(); }
+fn completions_bash() {
+    let tmp = tempfile::tempdir().unwrap();
+    bin().env("XDG_CONFIG_HOME", tmp.path()).env("XDG_CACHE_HOME", tmp.path()).args(["completions","--shell","bash"]).assert().success();
+}
 
 #[test]
-fn json_log_format() { bin().args(["--log-format","json","list"]).assert().success(); }
+fn json_log_format() {
+    let tmp = tempfile::tempdir().unwrap();
+    bin().env("XDG_CONFIG_HOME", tmp.path()).env("XDG_CACHE_HOME", tmp.path()).args(["--log-format","json","list"]).assert().success();
+}
 
 #[test]
 fn login_session_permissions_restrictive() {
