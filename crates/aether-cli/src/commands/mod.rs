@@ -7,6 +7,8 @@ pub mod list;
 pub mod completions;
 pub mod netfail;
 pub mod iofail;
+pub mod usagefail;
+pub mod runtimefail;
 
 #[derive(clap::ValueEnum, Clone, Debug)]
 pub enum LogFormat { Auto, Text, Json }
@@ -43,4 +45,10 @@ pub enum Commands {
     /// Simulate IO error (hidden, for testing exit codes)
     #[command(hide = true)]
     Iofail {},
+    /// Simulate usage error (hidden, for testing exit codes)
+    #[command(hide = true)]
+    Usagefail {},
+    /// Simulate runtime error (hidden, for testing exit codes)
+    #[command(hide = true)]
+    Runtimefail {},
 }

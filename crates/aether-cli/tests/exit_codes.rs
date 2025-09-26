@@ -28,6 +28,20 @@ fn io_error_simulated_via_command() {
 }
 
 #[test]
+fn usage_error_simulated_via_command() {
+    let assert = bin().arg("usagefail").assert().failure();
+    let code = assert.get_output().status.code().unwrap();
+    assert_eq!(code, 2, "expected usage exit code 2, got {code}");
+}
+
+#[test]
+fn runtime_error_simulated_via_command() {
+    let assert = bin().arg("runtimefail").assert().failure();
+    let code = assert.get_output().status.code().unwrap();
+    assert_eq!(code, 20, "expected runtime exit code 20, got {code}");
+}
+
+#[test]
 fn config_error_invalid_toml() {
     let tmp = tempfile::tempdir().unwrap();
     let cfg_dir = tmp.path().join("aether");

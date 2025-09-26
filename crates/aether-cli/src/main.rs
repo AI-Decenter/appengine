@@ -36,6 +36,8 @@ async fn dispatch(cli: Cli, _cfg: EffectiveConfig) -> Result<()> {
         Commands::Completions { shell } => { let _span = info_span!("cmd.completions"); commands::completions::handle(shell) }
         Commands::Netfail {} => { let _span = info_span!("cmd.netfail"); commands::netfail::handle().await }
         Commands::Iofail {} => { let _span = info_span!("cmd.iofail"); commands::iofail::handle().await }
+        Commands::Usagefail {} => { let _span = info_span!("cmd.usagefail"); commands::usagefail::handle().await }
+        Commands::Runtimefail {} => { let _span = info_span!("cmd.runtimefail"); commands::runtimefail::handle().await }
     };
     let took = start.elapsed().as_millis();
     match &result { Ok(_) => info!(event="cmd.finished", took_ms=%took), Err(e)=> { eprintln!("error: {e}"); info!(event="cmd.failed", took_ms=%took); } }
