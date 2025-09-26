@@ -42,8 +42,7 @@ pub fn normalize_path(raw: &str) -> String {
     let uuid_like = |s: &str| s.len() == 36 && s.chars().filter(|c| *c == '-').count() == 4;
     let mut parts: Vec<String> = raw.split('/')
         .filter(|s| !s.is_empty())
-        .enumerate()
-        .map(|(_idx, seg)| {
+        .map(|seg| {
             if seg.is_empty() { return seg.to_string(); }
             if seg.chars().all(|c| c.is_ascii_digit()) || uuid_like(seg) { return ":id".to_string(); }
             seg.to_string()
