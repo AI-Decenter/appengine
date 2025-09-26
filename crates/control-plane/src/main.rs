@@ -1,7 +1,11 @@
 //! Binary entrypoint for the Control Plane service.
 use control_plane::{db::init_db, build_router, AppState};
-use tracing::{info, error};
+use tracing::info;
 use std::net::SocketAddr;
+use axum::{http::Request, middleware::{self, Next}, response::Response, body::Body};
+use tower_http::limit::RequestBodyLimitLayer;
+use control_plane::telemetry::HTTP_REQUESTS;
+use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -11,11 +15,30 @@ async fn main() -> anyhow::Result<()> {
         .init();
     let database_url = std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://aether:postgres@localhost:5432/aether_dev".to_string());
-    // Try DB init; if fails we still start (but endpoints needing DB would return 500 in future). For MVP we allow panic
-    let db_pool = match init_db(&database_url).await { Ok(p)=>Some(p), Err(e)=> { error!(error=%e, "database init failed"); None } };
-    let app = build_router(AppState { db: db_pool });
+    let db_pool = init_db(&database_url).await.expect("database must be available");
+    let state = AppState { db: db_pool };
+    let app = build_router(state);
+    async fn track_metrics(req: Request<Body>, next: Next) -> Response {
+        let method = req.method().clone();
+        let path = req.uri().path().to_string();
+        let resp = next.run(req).await;
+        let status = resp.status().as_u16().to_string();
+        HTTP_REQUESTS.with_label_values(&[method.as_str(), path.as_str(), status.as_str()]).inc();
+        resp
+    }
+    let app = app
+        .layer(RequestBodyLimitLayer::new(1 * 1024 * 1024))
+        .layer(middleware::from_fn(track_metrics));
     let addr: SocketAddr = "0.0.0.0:3000".parse()?;
     info!(%addr, "control-plane listening");
-    axum::serve(tokio::net::TcpListener::bind(addr).await?, app).await?;
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let shutdown = async {
+        tokio::signal::ctrl_c().await.expect("install ctrl_c");
+    info!(target: "shutdown.signal", "received Ctrl+C");
+        tokio::time::sleep(Duration::from_millis(200)).await; // graceful drain window
+    };
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown)
+        .await?;
     Ok(())
 }

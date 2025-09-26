@@ -2,23 +2,63 @@ pub mod db;
 pub mod handlers;
 pub mod models;
 pub mod error;
+pub mod services;
+pub mod telemetry;
 
 use axum::{Router, routing::{get, post}};
 use sqlx::{Pool, Postgres};
 use handlers::{health::health, apps::{list_apps, app_logs, create_app, app_deployments}, deployments::{create_deployment, list_deployments}, readiness::readiness};
+use utoipa::OpenApi;
+use crate::telemetry::metrics_handler;
+use axum::response::Html;
 
 #[derive(Clone)]
-pub struct AppState { pub db: Option<Pool<Postgres>> }
+pub struct AppState { pub db: Pool<Postgres> }
+
+#[derive(OpenApi)]
+#[openapi(
+    paths(
+        handlers::health::health,
+        handlers::readiness::readiness,
+        handlers::apps::create_app,
+        handlers::apps::list_apps,
+        handlers::apps::app_deployments,
+        handlers::deployments::create_deployment,
+        handlers::deployments::list_deployments,
+    ),
+    tags( (name = "aether", description = "Aether Control Plane API") )
+)]
+pub struct ApiDoc;
+
+async fn swagger_ui() -> Html<String> {
+    let html = r#"<!DOCTYPE html>
+<html lang=\"en\">
+<head><meta charset=\"UTF-8\"/><title>Aether API Docs</title>
+<link rel=\"stylesheet\" href=\"https://unpkg.com/swagger-ui-dist@5/swagger-ui.css\" />
+</head>
+<body>
+<div id=\"swagger-ui\"></div>
+<script src=\"https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js\"></script>
+<script>
+window.onload = () => { SwaggerUIBundle({ url: '/openapi.json', dom_id: '#swagger-ui' }); };
+</script>
+</body></html>"#;
+    Html(html.to_string())
+}
 
 pub fn build_router(state: AppState) -> Router {
+    let openapi = ApiDoc::openapi();
     Router::new()
         .route("/health", get(health))
         .route("/readyz", get(readiness))
-    .route("/deployments", post(create_deployment).get(list_deployments))
+        .route("/metrics", get(metrics_handler))
+        .route("/deployments", post(create_deployment).get(list_deployments))
         .route("/apps", post(create_app))
         .route("/apps", get(list_apps))
-    .route("/apps/:app_name/deployments", get(app_deployments))
+        .route("/apps/:app_name/deployments", get(app_deployments))
         .route("/apps/:app_name/logs", get(app_logs))
+        .route("/openapi.json", get(|| async move { axum::Json(openapi.clone()) }))
+        .route("/swagger", get(swagger_ui))
         .with_state(state)
 }
 
@@ -31,7 +71,9 @@ mod tests {
 
     #[tokio::test]
     async fn health_ok() {
-        let app = build_router(AppState { db: None });
+    let pool = sqlx::postgres::PgPoolOptions::new().max_connections(1).connect(&std::env::var("DATABASE_URL").unwrap_or_default()).await.ok();
+    if pool.is_none() { eprintln!("skipping health_ok (no db)" ); return; }
+    let app = build_router(AppState { db: pool.unwrap() });
         let res = app.oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let body = axum::body::to_bytes(res.into_body(), 1024).await.unwrap();
@@ -46,7 +88,7 @@ mod tests {
         sqlx::query("DELETE FROM deployments").execute(&pool).await.ok();
         sqlx::query("DELETE FROM applications").execute(&pool).await.ok();
         sqlx::query("INSERT INTO applications (name) VALUES ($1)").bind("app1").execute(&pool).await.unwrap();
-        let app_router = build_router(AppState { db: Some(pool) });
+        let app_router = build_router(AppState { db: pool });
         let body = serde_json::json!({"app_name":"app1","artifact_url":"file://artifact"}).to_string();
         let req = Request::builder().method("POST").uri("/deployments")
             .header("content-type","application/json")
@@ -62,7 +104,7 @@ mod tests {
         let pool = sqlx::postgres::PgPoolOptions::new().max_connections(1).connect(&std::env::var("DATABASE_URL").unwrap()).await.unwrap();
         sqlx::query("DELETE FROM deployments").execute(&pool).await.ok();
         sqlx::query("DELETE FROM applications").execute(&pool).await.ok();
-        let app_router = build_router(AppState { db: Some(pool) });
+    let app_router = build_router(AppState { db: pool });
         let res = app_router.oneshot(Request::builder().uri("/apps").body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let body = axum::body::to_bytes(res.into_body(), 1024).await.unwrap();
@@ -72,7 +114,9 @@ mod tests {
 
     #[tokio::test]
     async fn app_logs_empty() {
-        let app = build_router(AppState { db: None });
+    let pool = sqlx::postgres::PgPoolOptions::new().max_connections(1).connect(&std::env::var("DATABASE_URL").unwrap_or_default()).await.ok();
+    if pool.is_none() { eprintln!("skipping app_logs_empty (no db)" ); return; }
+    let app = build_router(AppState { db: pool.unwrap() });
         let res = app.oneshot(Request::builder().uri("/apps/demo/logs").body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let body = axum::body::to_bytes(res.into_body(), 1024).await.unwrap();
@@ -81,7 +125,9 @@ mod tests {
 
     #[tokio::test]
     async fn readiness_ok() {
-        let app = build_router(AppState { db: None });
+    let pool = sqlx::postgres::PgPoolOptions::new().max_connections(1).connect(&std::env::var("DATABASE_URL").unwrap_or_default()).await.ok();
+    if pool.is_none() { eprintln!("skipping readiness_ok (no db)" ); return; }
+    let app = build_router(AppState { db: pool.unwrap() });
         let res = app.oneshot(Request::builder().uri("/readyz").body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
     }
@@ -90,7 +136,7 @@ mod tests {
     async fn create_deployment_bad_json() {
         if std::env::var("DATABASE_URL").is_err() { eprintln!("skipping create_deployment_bad_json (no DATABASE_URL)" ); return; }
         let pool = sqlx::postgres::PgPoolOptions::new().max_connections(1).connect(&std::env::var("DATABASE_URL").unwrap()).await.unwrap();
-        let app_router = build_router(AppState { db: Some(pool) });
+    let app_router = build_router(AppState { db: pool });
         let req = Request::builder().method("POST").uri("/deployments")
             .header("content-type","application/json")
             .body(Body::from("{invalid"))
@@ -105,7 +151,7 @@ mod tests {
         let pool = sqlx::postgres::PgPoolOptions::new().max_connections(1).connect(&std::env::var("DATABASE_URL").unwrap()).await.unwrap();
         sqlx::query("DELETE FROM deployments").execute(&pool).await.ok();
         sqlx::query("DELETE FROM applications").execute(&pool).await.ok();
-        let app_router = build_router(AppState { db: Some(pool) });
+    let app_router = build_router(AppState { db: pool });
         let res = app_router.oneshot(Request::builder().uri("/deployments").body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let body = axum::body::to_bytes(res.into_body(), 1024).await.unwrap();
@@ -122,7 +168,7 @@ mod tests {
         sqlx::query("INSERT INTO applications (name) VALUES ($1)").bind("appx").execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO deployments (app_id, artifact_url, status) SELECT id, $1, 'pending' FROM applications WHERE name = $2")
             .bind("file://a").bind("appx").execute(&pool).await.unwrap();
-        let app_router = build_router(AppState { db: Some(pool) });
+    let app_router = build_router(AppState { db: pool });
         let res = app_router.oneshot(Request::builder().uri("/apps/appx/deployments").body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let body = axum::body::to_bytes(res.into_body(), 1024).await.unwrap();
@@ -137,7 +183,7 @@ mod tests {
         sqlx::query("DELETE FROM deployments").execute(&pool).await.ok();
         sqlx::query("DELETE FROM applications").execute(&pool).await.ok();
         sqlx::query("INSERT INTO applications (name) VALUES ($1)").bind("dupe").execute(&pool).await.unwrap();
-        let app_router = build_router(AppState { db: Some(pool) });
+    let app_router = build_router(AppState { db: pool });
         let body = serde_json::json!({"name":"dupe"}).to_string();
         let req = Request::builder().method("POST").uri("/apps")
             .header("content-type","application/json")

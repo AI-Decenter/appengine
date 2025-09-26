@@ -152,17 +152,80 @@ Trạng thái cập nhật:
   - Thêm coverage, benchmark, security (cargo-deny) vào pipeline.
 7. Đã tạo `sqlx-data.json` (offline prepare) – sẽ tiếp tục mở rộng khi chuyển sang macro nhiều hơn.
 8. README có mục mô tả Error Format.
-9. Sẵn sàng mở rộng sang OpenAPI & metrics trong bước kế tiếp (chưa thực hiện vì ngoài phạm vi Issue #2 gốc).
+9. (ĐÃ THỰC HIỆN) OpenAPI spec + metrics + giới hạn body + graceful shutdown cơ bản (được liệt kê chi tiết ở phần Enhancement bên dưới).
 
-Phần còn lại (để lại cho issue khác / future enhancements): OpenAPI spec, metrics `/metrics`, auth/RBAC, rate limiting, body limit/timeout layer, service layer tách biệt, graceful shutdown nâng cao, events bus, CORS.
+Phần còn lại (để lại cho issue khác / future enhancements – đã loại bỏ các mục vừa hoàn thành): auth/RBAC, rate limiting, timeout layer, mở rộng service layer (tách hoàn toàn truy vấn còn lại), graceful shutdown nâng cao (drain connection pool, in‑flight tracking), events bus, CORS, pagination, path normalization cho metrics, OpenAPI error schemas, client SDK, nâng cao readiness (DB ping + pending migrations), normalization của HTTP metrics (template path), caching / performance tối ưu thêm.
 
-=> Issue #2 coi như HOÀN THÀNH (completed + extended). 
+=> Issue #2 coi như HOÀN THÀNH (completed + extended) – đã vượt scope ban đầu với các tính năng quan sát & contract. 
 
 ### 7. Bổ sung đã triển khai ngoài phạm vi ban đầu
 - JSON error envelope thống nhất.
-- Tracing instrumentation chi tiết.
+- Tracing instrumentation chi tiết (span với trường ngữ cảnh chính: app_name, deployment_id...).
 - Endpoint mở rộng: list deployments toàn cục và theo app.
-- Kiểm thử conflict ứng dụng.
-- CI multi-platform (Linux DB + macOS no-DB) + coverage + performance benchmark.
-- Chuẩn hoá migration tối giản.
-- Offline `sqlx prepare` + kiểm tra tự động.
+- Kiểm thử conflict ứng dụng (409) & bad JSON (400) cho deployments.
+- CI multi-platform (Linux DB + macOS no-DB) + coverage + benchmark skeleton + security check.
+- Chuẩn hoá migration tối giản (2 bảng cốt lõi).
+- Offline `sqlx prepare` + kiểm tra tự động trong pipeline.
+- Bổ sung OpenAPI (`utoipa`) tự sinh /openapi.json.
+- Swagger UI phục vụ tại `/swagger` (HTML tùy biến dùng CDN) – không phụ thuộc crate swagger UI do xung đột state type; đơn giản, dễ bảo trì.
+- Prometheus metrics endpoint `/metrics` + counter HTTP (labels: method, path, status).
+- Middleware metrics tùy biến (axum `from_fn`).
+- Giới hạn kích thước body (1MB) qua `tower-http` `RequestBodyLimitLayer`.
+- Graceful shutdown cơ bản (Ctrl+C -> delay 200ms để drain).
+- AppState.db chuyển sang bắt buộc (không còn `Option`).
+- Service layer bước đầu (`services::apps`, `services::deployments`) tách logic DB khỏi handler.
+
+### 8. Tổng quan OpenAPI & Metrics (Hiện trạng)
+**OpenAPI**:
+- Bao phủ các route: /health, /readyz, /apps (POST/GET), /apps/{app_name}/deployments, /apps/{app_name}/logs, /deployments (POST/GET).
+- Schemas đã derive (`ToSchema`) cho: CreateAppReq/Resp, ListAppItem, CreateDeploymentRequest/Response, DeploymentItem, AppDeploymentItem, HealthResponse.
+- Chưa: mô tả error schema chung, chuẩn hoá các mã HTTP lỗi trong spec (kế hoạch thêm `ApiError`).
+
+**Swagger UI**:
+- Trang HTML đơn giản (CDN) tại `/swagger` -> tải spec từ `/openapi.json`.
+- Ưu điểm: tránh phụ thuộc phiên bản swagger-ui crate chưa tương thích axum router state generics.
+
+**Metrics**:
+- `/metrics` xuất Prometheus text format.
+- Counter `HTTP_REQUESTS` với 3 label: method, raw_path, status.
+- Kế hoạch cải tiến: chuẩn hoá path (biến tham số -> token), thêm histogram latency (p95/p99), phân tách lỗi / success.
+
+### 9. Next Steps (Đề xuất follow-up)
+1. OpenAPI nâng cao: thêm `ApiError` vào components + tham chiếu ở responses 4xx/5xx.
+2. Metrics nâng cao: histogram thời gian xử lý, path template hoá, gauge connection pool usage.
+3. Readiness nâng cao: thực hiện `SELECT 1`, kiểm tra migrations đã chạy; có thể thêm `/startupz`.
+4. Hoàn thiện service layer: di chuyển truy vấn còn lại từ handler (`app_deployments`) vào `services`.
+5. Pagination & filters: cho list apps & deployments (limit/offset hoặc cursor).
+6. Auth/RBAC nhẹ: header token static + role mapping (chuẩn bị cho multi-tenant).
+7. Timeout & cancelation: thêm `tower-http` timeout layer + request id propagation.
+8. Normalized logging: thêm request_id (UUID v7) + correlation in traces.
+9. Client SDK: generate TypeScript (openapi-typescript) + Rust client stub.
+10. Deployment events: bảng events + publish hook (Kafka/NATS tương lai).
+11. Security hardening: rate limit, optional CORS whitelist, SQLx TLS.
+12. Fuzz / property tests: payload fuzzing cho create endpoints.
+
+### 10. Snapshot Trạng Thái Hiện Tại (Checklist Nhanh)
+| Hạng mục | Trạng thái |
+|----------|------------|
+| CRUD apps/deployments thực | ✅ |
+| JSON error format thống nhất | ✅ |
+| Tracing spans có ngữ cảnh | ✅ |
+| OpenAPI /openapi.json | ✅ |
+| Swagger UI /swagger | ✅ (custom HTML) |
+| Metrics /metrics (counter) | ✅ |
+| Body size limit | ✅ (1MB) |
+| Graceful shutdown cơ bản | ✅ |
+| AppState.db bắt buộc | ✅ |
+| Service layer (partial) | ✅ (còn 1 truy vấn inline) |
+| Offline sqlx prepare | ✅ |
+| CI Postgres + macOS split | ✅ |
+| Histogram latency | ❌ (planned) |
+| Error schema OpenAPI | ❌ (planned) |
+| Auth/RBAC | ❌ |
+| Rate limiting | ❌ |
+| Timeout layer | ❌ |
+| Path normalization metrics | ❌ |
+| Pagination | ❌ |
+| Events bus | ❌ |
+| Client SDK | ❌ |
+
