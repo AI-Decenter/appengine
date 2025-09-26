@@ -19,7 +19,8 @@ pub struct AppState { pub db: Pool<Postgres> }
 #[openapi(
     paths(
         handlers::health::health,
-        handlers::readiness::readiness,
+    handlers::readiness::readiness,
+    handlers::readiness::startupz,
         handlers::apps::create_app,
         handlers::apps::list_apps,
         handlers::apps::app_deployments,
@@ -51,7 +52,8 @@ pub fn build_router(state: AppState) -> Router {
     let openapi = ApiDoc::openapi();
     Router::new()
         .route("/health", get(health))
-        .route("/readyz", get(readiness))
+    .route("/readyz", get(readiness))
+    .route("/startupz", get(handlers::readiness::startupz))
         .route("/metrics", get(metrics_handler))
         .route("/deployments", post(create_deployment).get(list_deployments))
         .route("/apps", post(create_app))
@@ -194,5 +196,14 @@ mod tests {
         let body_bytes = axum::body::to_bytes(res.into_body(), 1024).await.unwrap();
         let v: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
         assert_eq!(v["code"], "conflict");
+    }
+
+    #[test]
+    fn normalize_path_property() {
+        use crate::telemetry::normalize_path;
+        // UUID and numeric collapsed
+        assert_eq!(normalize_path("/deployments/123"), "/deployments/:id");
+        assert_eq!(normalize_path("/deployments/550e8400-e29b-41d4-a716-446655440000"), "/deployments/:id");
+        assert_eq!(normalize_path("/apps/myapp/deployments"), "/apps/:app_name/deployments");
     }
 }

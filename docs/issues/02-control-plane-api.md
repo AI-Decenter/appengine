@@ -206,6 +206,7 @@ Phần còn lại (để lại cho issue khác / future enhancements – đã lo
 10. Deployment events: (TODO) events table + hook publisher abstraction.
 11. Security hardening: (TODO) rate limit, CORS whitelist, SQLx TLS.
 12. Fuzz / property tests: (TODO) fuzz create & list endpoints.
+13. Client SDK script: (DONE initial) shell script `scripts/gen-ts-sdk.sh` tạo TypeScript types (cần Node + openapi-typescript).
 
 ### 10. Snapshot Trạng Thái Hiện Tại (Checklist Nhanh)
 | Hạng mục | Trạng thái |
@@ -223,12 +224,12 @@ Phần còn lại (để lại cho issue khác / future enhancements – đã lo
 | Offline sqlx prepare | ✅ |
 | CI Postgres + macOS split | ✅ |
 | Histogram latency | ✅ (basic histogram added) |
-| Error schema OpenAPI component | ✅ (component only; responses pending) |
+| Error schema OpenAPI component | ✅ (component + responses wired) |
 | Auth/RBAC | ❌ |
 | Rate limiting | ❌ |
-| Timeout layer | ❌ |
-| Path normalization metrics | ✅ (partial) |
-| Pagination | ✅ (apps, deployments) |
+| Timeout layer | ✅ (basic 10s) |
+| Path normalization metrics | ✅ (extended) |
+| Pagination | ✅ (apps, deployments, app deployments) |
 | Events bus | ❌ |
 | Client SDK | ❌ |
 

@@ -2,10 +2,11 @@
 use control_plane::{db::init_db, build_router, AppState};
 use tracing::info;
 use std::net::SocketAddr;
-use axum::{http::Request, middleware::{self, Next}, response::Response, body::Body};
-use tower_http::limit::RequestBodyLimitLayer;
-use control_plane::telemetry::{HTTP_REQUESTS, HTTP_REQUEST_DURATION, normalize_path};
-use std::time::Duration;
+use axum::{http::{Request, HeaderValue}, middleware::{self, Next}, response::Response, body::Body};
+use tower_http::{limit::RequestBodyLimitLayer, cors::CorsLayer};
+use control_plane::telemetry::{HTTP_REQUESTS, HTTP_REQUEST_DURATION, normalize_path, DB_POOL_IDLE, DB_POOL_IN_USE, DB_POOL_SIZE};
+use std::{time::Duration, collections::HashMap, net::IpAddr, sync::{Arc, Mutex}};
+use uuid::Uuid;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -17,21 +18,66 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|_| "postgres://aether:postgres@localhost:5432/aether_dev".to_string());
     let db_pool = init_db(&database_url).await.expect("database must be available");
     let state = AppState { db: db_pool };
-    let app = build_router(state);
-    async fn track_metrics(req: Request<Body>, next: Next) -> Response {
+    let rate_limit_enabled = std::env::var("AETHER_RATE_LIMIT").unwrap_or_default() == "1";
+    let auth_token = std::env::var("AETHER_API_TOKEN").ok();
+    let rate_state: Arc<Mutex<HashMap<IpAddr,(u32,std::time::Instant)>>> = Arc::new(Mutex::new(HashMap::new()));
+    let app = build_router(state.clone());
+    async fn track_metrics(mut req: Request<Body>, next: Next) -> Response {
         let method = req.method().clone();
         let raw_path = req.uri().path().to_string();
         let path_label = normalize_path(&raw_path);
+    let req_id = Uuid::new_v4();
+        req.extensions_mut().insert(req_id);
         let start = std::time::Instant::now();
-        let resp = next.run(req).await;
+        let mut resp = next.run(req).await;
         let status = resp.status().as_u16().to_string();
-        HTTP_REQUESTS.with_label_values(&[method.as_str(), path_label.as_str(), status.as_str()]).inc();
+        let outcome = if let Ok(code) = status.parse::<u16>() { code < 400 } else { false };
+        HTTP_REQUESTS.with_label_values(&[method.as_str(), path_label.as_str(), status.as_str(), if outcome {"success"} else {"error"}]).inc();
         let elapsed = start.elapsed().as_secs_f64();
         HTTP_REQUEST_DURATION.with_label_values(&[method.as_str(), path_label.as_str()]).observe(elapsed);
+    resp.headers_mut().insert("x-request-id", HeaderValue::from_str(&Uuid::new_v4().to_string()).unwrap());
         resp
     }
+    // Auth + Rate limit + Pool gauges
+    let auth_token_clone = auth_token.clone();
+    let state_clone = state.clone();
+    let rate_state_clone = rate_state.clone();
+    let auth_and_limit = move |req: Request<Body>, next: Next| {
+        let auth_token = auth_token_clone.clone();
+        let state_for_pool = state_clone.clone();
+        let rate_state = rate_state_clone.clone();
+        async move {
+            let path = req.uri().path();
+            let exempt = matches!(path, "/health"|"/readyz"|"/startupz"|"/metrics"|"/openapi.json"|"/swagger");
+            if !exempt && rate_limit_enabled {
+                if let Some(remote) = req.extensions().get::<std::net::SocketAddr>() { // may not be set; skip if absent
+                    let ip = remote.ip();
+                    let mut guard = rate_state.lock().unwrap();
+                    let entry = guard.entry(ip).or_insert((0, std::time::Instant::now() + Duration::from_secs(60)));
+                    if std::time::Instant::now() > entry.1 { *entry = (0, std::time::Instant::now() + Duration::from_secs(60)); }
+                    if entry.0 >= 60 { return Response::builder().status(429).body(Body::from("rate_limit")).unwrap(); }
+                    entry.0 += 1;
+                }
+            }
+            if !exempt {
+                if let Some(expected) = auth_token {
+                    let ok = req.headers().get("authorization").and_then(|v| v.to_str().ok()).map(|v| v == format!("Bearer {expected}")).unwrap_or(false);
+                    if !ok { return Response::builder().status(401).body(Body::from("unauthorized")).unwrap(); }
+                }
+            }
+            let pool = &state_for_pool.db;
+            let size = pool.size() as i64;
+            let idle = pool.num_idle() as i64;
+            DB_POOL_SIZE.set(size);
+            DB_POOL_IDLE.set(idle);
+            DB_POOL_IN_USE.set(size - idle);
+            next.run(req).await
+        }
+    };
     const MAX_BODY_BYTES: usize = 1024 * 1024; // 1MB
     let app = app
+        .layer(CorsLayer::permissive())
+        .layer(middleware::from_fn(auth_and_limit))
         .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES))
         .layer(middleware::from_fn(track_metrics));
     let addr: SocketAddr = "0.0.0.0:3000".parse()?;

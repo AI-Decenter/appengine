@@ -2,7 +2,7 @@ use axum::{Json, http::StatusCode, extract::{State, Query}};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
-use crate::{AppState, models::Deployment, error::{ApiError, ApiResult}, services};
+use crate::{AppState, models::Deployment, error::{ApiError, ApiResult, ApiErrorBody}, services};
 // use sqlx::Row; // no longer needed after refactor
 
 #[derive(Deserialize, ToSchema)]
@@ -12,7 +12,7 @@ pub struct CreateDeploymentRequest { pub app_name: String, pub artifact_url: Str
 pub struct CreateDeploymentResponse { pub id: Uuid, pub status: &'static str }
 
 /// Create deployment
-#[utoipa::path(post, path = "/deployments", request_body = CreateDeploymentRequest, responses( (status=201, body=CreateDeploymentResponse), (status=404, description="app not found") ))]
+#[utoipa::path(post, path = "/deployments", request_body = CreateDeploymentRequest, responses( (status=201, body=CreateDeploymentResponse), (status=404, body=ApiErrorBody, description="app not found"), (status=400, body=ApiErrorBody), (status=500, body=ApiErrorBody) ))]
 #[tracing::instrument(level="info", skip(state, req), fields(app_name=%req.app_name))]
 pub async fn create_deployment(State(state): State<AppState>, Json(req): Json<CreateDeploymentRequest>) -> ApiResult<(StatusCode, Json<CreateDeploymentResponse>)> {
     let deployment: Deployment = services::deployments::create_deployment(&state.db, &req.app_name, &req.artifact_url)
@@ -31,7 +31,7 @@ pub struct DeploymentQuery { pub app_name: Option<String>, pub limit: Option<i64
 pub struct DeploymentItem { pub id: Uuid, pub app_id: Uuid, pub artifact_url: String, pub status: String }
 
 /// List deployments (optionally filter by app_name, paginated)
-#[utoipa::path(get, path = "/deployments", params( ("app_name" = Option<String>, Query, description = "Filter by application name"), ("limit" = Option<i64>, Query, description="Max items (default 100, max 1000)"), ("offset" = Option<i64>, Query, description="Offset") ), responses( (status=200, body=[DeploymentItem]) ))]
+#[utoipa::path(get, path = "/deployments", params( ("app_name" = Option<String>, Query, description = "Filter by application name"), ("limit" = Option<i64>, Query, description="Max items (default 100, max 1000)"), ("offset" = Option<i64>, Query, description="Offset") ), responses( (status=200, body=[DeploymentItem]), (status=500, body=ApiErrorBody) ))]
 #[tracing::instrument(level="debug", skip(state, q), fields(filter_app=?q.app_name, limit=?q.limit, offset=?q.offset))]
 pub async fn list_deployments(State(state): State<AppState>, Query(q): Query<DeploymentQuery>) -> ApiResult<Json<Vec<DeploymentItem>>> {
     let limit = q.limit.unwrap_or(100).clamp(1, 1000);

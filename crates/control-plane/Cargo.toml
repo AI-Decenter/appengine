@@ -18,9 +18,12 @@ chrono = { workspace = true }
 thiserror = { workspace = true }
 once_cell = { workspace = true }
 k8s-openapi = { version = "0.21", features = ["v1_28"] }
-tower = { version = "0.4", features = ["util"] }
+tower = { version = "0.4", features = ["util","timeout"] }
 utoipa = { version = "5", features = ["chrono", "uuid", "axum_extras"] }
 prometheus = "0.14"
 axum-extra = { version = "0.9", features = ["typed-header"] }
-tower-http = { version = "0.5", features = ["limit", "trace"] }
+tower-http = { version = "0.5", features = ["limit", "trace", "cors"] }
+
+[dev-dependencies]
+proptest = "1"
 
