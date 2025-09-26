@@ -79,7 +79,7 @@ Issue này tập trung vào việc xây dựng "bộ não" của AetherEngine - 
 
 ### 4. Yêu cầu về Kiểm thử (Testing Requirements)
 - **Unit Tests:**
-  - [ ] Test logic DB thực tế (sẽ thực hiện sau khi thêm thao tác CRUD thật; hiện chưa có đủ logic cần test).
+  - [x] Test logic DB thực tế (create/list applications, create/list deployments, xung đột tên application, truy vấn deployments theo app).
   - [x] (Ở mức tối thiểu) Các handler đơn giản được kiểm tra thông qua integration tests.
 - **Integration Tests:**
   - [x] Test cho từng API endpoint hiện có (/health, /readyz, /deployments, /apps, /apps/{app}/logs).
@@ -89,7 +89,7 @@ Issue này tập trung vào việc xây dựng "bộ não" của AetherEngine - 
   - [x] Trường hợp lỗi: body JSON không hợp lệ ở `POST /deployments` → 400.
 - **Kiểm thử Thủ công:**
   - [x] Server khởi chạy được (địa chỉ mặc định: `0.0.0.0:3000`).
-  - [ ] Thực thi `sqlx migrate run` với Postgres cục bộ (cần cấu hình DB local trước). 
+  - [x] Thực thi `sqlx migrate run` với Postgres cục bộ / trong CI (được chạy trong job `test-linux`).
   - [x] Có thể gọi thử bằng `curl` (hướng dẫn giữ nguyên ở dưới):
    - `curl http://localhost:3000/health`
    - `curl -X POST http://localhost:3000/deployments -H "Content-Type: application/json" -d '{}'`
@@ -133,7 +133,36 @@ Issue này tập trung vào việc xây dựng "bộ não" của AetherEngine - 
   - Thêm CORS config nếu front-end sẽ truy cập trực tiếp.
 
 ### 6. Ghi chú Trạng thái Hiện Tại
-- Mức độ hoàn thành core mock API: 100% theo spec ban đầu (cộng thêm `/readyz`).
-- Migration hiện tại đã vượt spec (cần chuẩn hoá ghi chú trong README hoặc tách migration).
-- Chưa có logic CRUD thật; mọi endpoint (ngoại trừ health/readiness) đang trả dữ liệu giả lập.
-- Kiểm thử DB và unit test nâng cao sẽ thực hiện khi thêm logic business.
+Hoàn tất Definition of Done ban đầu và đã mở rộng thêm nhiều phần ngoài phạm vi mô tả gốc.
+
+Trạng thái cập nhật:
+1. CRUD cơ bản thực thi thật với Postgres:
+  - `POST /apps` tạo application (xử lý xung đột 409).
+  - `GET /apps` truy vấn danh sách thật từ DB.
+  - `POST /deployments` tạo deployment gắn với application tồn tại.
+  - `GET /deployments` & `GET /apps/:app/deployments` liệt kê dữ liệu thật.
+  - `GET /apps/:app/logs` vẫn placeholder (trả rỗng) – intentional.
+2. Migration đã được chuẩn hoá xuống chỉ còn 2 bảng cốt lõi (`applications`, `deployments`) + trigger cập nhật `updated_at` (nếu có) thay vì schema mở rộng.
+3. Đã chuẩn hoá lỗi JSON: mọi lỗi trả về dạng `{ "code": "...", "message": "..." }` (module `error.rs`).
+4. Thêm tracing instrumentation (`#[tracing::instrument]`) cho các handler chính (tạo/list apps, tạo/list deployments, truy vấn deployments theo app).
+5. Bổ sung test integration bao trùm các tình huống chính: health, readiness, create deployment, list rỗng, flow deployments theo app, xung đột tạo app, JSON không hợp lệ.
+6. CI:
+  - Thêm workflow chạy Postgres (Linux) + split job macOS (không Docker).
+  - Thực thi `sqlx migrate run` & `cargo sqlx prepare` trong CI.
+  - Thêm coverage, benchmark, security (cargo-deny) vào pipeline.
+7. Đã tạo `sqlx-data.json` (offline prepare) – sẽ tiếp tục mở rộng khi chuyển sang macro nhiều hơn.
+8. README có mục mô tả Error Format.
+9. Sẵn sàng mở rộng sang OpenAPI & metrics trong bước kế tiếp (chưa thực hiện vì ngoài phạm vi Issue #2 gốc).
+
+Phần còn lại (để lại cho issue khác / future enhancements): OpenAPI spec, metrics `/metrics`, auth/RBAC, rate limiting, body limit/timeout layer, service layer tách biệt, graceful shutdown nâng cao, events bus, CORS.
+
+=> Issue #2 coi như HOÀN THÀNH (completed + extended). 
+
+### 7. Bổ sung đã triển khai ngoài phạm vi ban đầu
+- JSON error envelope thống nhất.
+- Tracing instrumentation chi tiết.
+- Endpoint mở rộng: list deployments toàn cục và theo app.
+- Kiểm thử conflict ứng dụng.
+- CI multi-platform (Linux DB + macOS no-DB) + coverage + performance benchmark.
+- Chuẩn hoá migration tối giản.
+- Offline `sqlx prepare` + kiểm tra tự động.
