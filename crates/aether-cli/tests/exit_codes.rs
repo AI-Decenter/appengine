@@ -5,16 +5,17 @@ fn bin() -> Command { Command::cargo_bin("aether-cli").unwrap() }
 #[test]
 fn network_error_exit_code() {
     let tmp = tempfile::tempdir().unwrap();
-    std::env::set_var("XDG_CACHE_HOME", tmp.path());
-    std::env::set_var("XDG_CONFIG_HOME", tmp.path());
-    let assert = bin().arg("netfail").assert().failure();
+    let mut cmd = bin();
+    cmd.env("XDG_CACHE_HOME", tmp.path());
+    cmd.env("XDG_CONFIG_HOME", tmp.path());
+    let assert = cmd.arg("netfail").assert().failure();
     let code = assert.get_output().status.code().unwrap();
     assert_eq!(code, 40, "expected network error exit code 40, got {code}");
 }
 
 #[test]
 fn usage_error_bad_subcommand() {
-    let assert = Command::cargo_bin("aether-cli").unwrap().arg("--nonexistent").assert().failure();
+    let assert = bin().arg("--nonexistent").assert().failure();
     // clap uses code 2 for usage errors typically
     let code = assert.get_output().status.code().unwrap();
     assert_eq!(code, 2);
@@ -47,9 +48,11 @@ fn config_error_invalid_toml() {
     let cfg_dir = tmp.path().join("aether");
     std::fs::create_dir_all(&cfg_dir).unwrap();
     std::fs::write(cfg_dir.join("config.toml"), "***").unwrap();
-    std::env::set_var("XDG_CONFIG_HOME", tmp.path());
-    std::env::set_var("XDG_CACHE_HOME", tmp.path());
-    let assert = bin().arg("list").assert().failure();
+    
+    let mut cmd = bin();
+    cmd.env("XDG_CONFIG_HOME", tmp.path());
+    cmd.env("XDG_CACHE_HOME", tmp.path());
+    let assert = cmd.arg("list").assert().failure();
     let code = assert.get_output().status.code().unwrap();
     assert_eq!(code, 10, "expected config code 10 got {code}");
 }
