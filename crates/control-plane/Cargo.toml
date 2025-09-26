@@ -26,4 +26,5 @@ tower-http = { version = "0.5", features = ["limit", "trace", "cors"] }
 
 [dev-dependencies]
 proptest = "1"
+serial_test = "3"
 

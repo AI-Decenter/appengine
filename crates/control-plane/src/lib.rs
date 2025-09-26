@@ -85,6 +85,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn create_deployment_201() {
         if std::env::var("DATABASE_URL").is_err() { eprintln!("skipping create_deployment_201 (no DATABASE_URL)" ); return; }
         let pool = sqlx::postgres::PgPoolOptions::new().max_connections(1).connect(&std::env::var("DATABASE_URL").unwrap()).await.unwrap();
@@ -102,6 +103,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn list_apps_empty() {
         if std::env::var("DATABASE_URL").is_err() { eprintln!("skipping list_apps_empty (no DATABASE_URL)" ); return; }
         let pool = sqlx::postgres::PgPoolOptions::new().max_connections(1).connect(&std::env::var("DATABASE_URL").unwrap()).await.unwrap();
@@ -136,6 +138,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn create_deployment_bad_json() {
         if std::env::var("DATABASE_URL").is_err() { eprintln!("skipping create_deployment_bad_json (no DATABASE_URL)" ); return; }
         let pool = sqlx::postgres::PgPoolOptions::new().max_connections(1).connect(&std::env::var("DATABASE_URL").unwrap()).await.unwrap();
@@ -149,6 +152,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn list_deployments_empty() {
         if std::env::var("DATABASE_URL").is_err() { eprintln!("skipping list_deployments_empty (no DATABASE_URL)" ); return; }
         let pool = sqlx::postgres::PgPoolOptions::new().max_connections(1).connect(&std::env::var("DATABASE_URL").unwrap()).await.unwrap();
@@ -163,6 +167,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn app_deployments_flow() {
         if std::env::var("DATABASE_URL").is_err() { eprintln!("skipping app_deployments_flow (no DATABASE_URL)" ); return; }
         let pool = sqlx::postgres::PgPoolOptions::new().max_connections(1).connect(&std::env::var("DATABASE_URL").unwrap()).await.unwrap();
@@ -180,6 +185,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn app_deployments_empty_when_no_deployments() {
         if std::env::var("DATABASE_URL").is_err() { eprintln!("skipping app_deployments_empty_when_no_deployments (no DATABASE_URL)" ); return; }
         let pool = sqlx::postgres::PgPoolOptions::new().max_connections(1).connect(&std::env::var("DATABASE_URL").unwrap()).await.unwrap();
@@ -197,6 +203,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn create_app_conflict_error_json() {
         if std::env::var("DATABASE_URL").is_err() { eprintln!("skipping create_app_conflict_error_json (no DATABASE_URL)" ); return; }
         let pool = sqlx::postgres::PgPoolOptions::new().max_connections(1).connect(&std::env::var("DATABASE_URL").unwrap()).await.unwrap();
