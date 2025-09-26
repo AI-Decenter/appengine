@@ -124,6 +124,34 @@ Representative Endpoints (MVP subset):
 * `GET /apps/{app}/deployments` – List historical deployments
 * `GET /healthz`, `GET /readyz` – Liveness / readiness probes
 
+### 4.1 Error Format
+All API errors return a stable JSON envelope and appropriate HTTP status code:
+
+```
+HTTP/1.1 409 Conflict
+Content-Type: application/json
+
+{
+	"code": "conflict",
+	"message": "application name exists"
+}
+```
+
+Canonical error codes (subject to extension):
+| Code | HTTP | Semantics |
+|------|------|-----------|
+| `bad_request` | 400 | Payload / validation failure |
+| `not_found` | 404 | Entity does not exist |
+| `conflict` | 409 | Uniqueness or state conflict |
+| `service_unavailable` | 503 | Dependency (DB, downstream) not ready |
+| `internal` | 500 | Unclassified unexpected error |
+
+Design Notes:
+* Machine-friendly `code` enables future localization / client mapping.
+* `message` intentionally human oriented; avoid leaking internal stack traces.
+* Additional diagnostic fields (e.g. `details`, `trace_id`) may be added when tracing is wired.
+* Non-error (2xx) responses never include this envelope.
+
 ---
 
 ## 5. Artifact Registry

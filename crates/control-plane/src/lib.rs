@@ -129,4 +129,23 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v.as_array().unwrap().len(), 1);
     }
+
+    #[tokio::test]
+    async fn create_app_conflict_error_json() {
+        if std::env::var("DATABASE_URL").is_err() { eprintln!("skipping create_app_conflict_error_json (no DATABASE_URL)" ); return; }
+        let pool = sqlx::postgres::PgPoolOptions::new().max_connections(1).connect(&std::env::var("DATABASE_URL").unwrap()).await.unwrap();
+        sqlx::query("DELETE FROM deployments").execute(&pool).await.ok();
+        sqlx::query("DELETE FROM applications").execute(&pool).await.ok();
+        sqlx::query("INSERT INTO applications (name) VALUES ($1)").bind("dupe").execute(&pool).await.unwrap();
+        let app_router = build_router(AppState { db: Some(pool) });
+        let body = serde_json::json!({"name":"dupe"}).to_string();
+        let req = Request::builder().method("POST").uri("/apps")
+            .header("content-type","application/json")
+            .body(Body::from(body)).unwrap();
+        let res = app_router.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::CONFLICT);
+        let body_bytes = axum::body::to_bytes(res.into_body(), 1024).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(v["code"], "conflict");
+    }
 }

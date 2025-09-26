@@ -10,6 +10,7 @@ pub struct CreateAppReq { pub name: String }
 #[derive(Serialize)]
 pub struct CreateAppResp { pub id: uuid::Uuid, pub name: String }
 
+#[tracing::instrument(level="info", skip(state, body), fields(app_name=%body.name))]
 pub async fn create_app(State(state): State<AppState>, Json(body): Json<CreateAppReq>) -> ApiResult<(StatusCode, Json<CreateAppResp>)> {
     let pool = state.db.as_ref().ok_or_else(ApiError::service_unavailable)?;
     let rec: Application = sqlx::query_as::<_, Application>("INSERT INTO applications (name) VALUES ($1) RETURNING id, name, created_at, updated_at")
@@ -18,12 +19,14 @@ pub async fn create_app(State(state): State<AppState>, Json(body): Json<CreateAp
             if let Some(db_code) = e.as_database_error().and_then(|d| d.code()) { if db_code == "23505" { return ApiError::conflict("application name exists"); } }
             ApiError::internal(format!("insert error: {e}"))
         })?;
+    tracing::info!(app_id=%rec.id, "application created");
     Ok((StatusCode::CREATED, Json(CreateAppResp { id: rec.id, name: rec.name })))
 }
 
 #[derive(Serialize)]
 pub struct ListAppItem { pub id: uuid::Uuid, pub name: String }
 
+#[tracing::instrument(level="debug", skip(state))]
 pub async fn list_apps(State(state): State<AppState>) -> ApiResult<Json<Vec<ListAppItem>>> {
     let pool = state.db.as_ref().ok_or_else(ApiError::service_unavailable)?;
     let rows: Vec<Application> = sqlx::query_as::<_, Application>("SELECT id, name, created_at, updated_at FROM applications ORDER BY created_at DESC")
@@ -37,6 +40,7 @@ use crate::models::Deployment;
 #[derive(serde::Serialize)]
 pub struct AppDeploymentItem { pub id: uuid::Uuid, pub artifact_url: String, pub status: String }
 
+#[tracing::instrument(level="debug", skip(state, app_name), fields(app_name=%app_name))]
 pub async fn app_deployments(State(state): State<AppState>, Path(app_name): Path<String>) -> ApiResult<Json<Vec<AppDeploymentItem>>> {
     let pool = state.db.as_ref().ok_or_else(ApiError::service_unavailable)?;
     // resolve app id

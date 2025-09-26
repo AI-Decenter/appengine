@@ -10,6 +10,7 @@ pub struct CreateDeploymentRequest { pub app_name: String, pub artifact_url: Str
 #[derive(Serialize)]
 pub struct CreateDeploymentResponse { pub id: Uuid, pub status: &'static str }
 
+#[tracing::instrument(level="info", skip(state, req), fields(app_name=%req.app_name))]
 pub async fn create_deployment(State(state): State<AppState>, Json(req): Json<CreateDeploymentRequest>) -> ApiResult<(StatusCode, Json<CreateDeploymentResponse>)> {
     let pool = state.db.as_ref().ok_or_else(ApiError::service_unavailable)?;
     // Resolve application id
@@ -22,6 +23,7 @@ pub async fn create_deployment(State(state): State<AppState>, Json(req): Json<Cr
         .bind(&req.artifact_url)
         .bind("pending")
         .fetch_one(pool).await.map_err(|e| ApiError::internal(format!("insert failure: {e}")))?;
+    tracing::info!(deployment_id=%deployment.id, "deployment created");
     Ok((StatusCode::CREATED, Json(CreateDeploymentResponse { id: deployment.id, status: "pending" })))
 }
 
@@ -31,6 +33,7 @@ pub struct DeploymentQuery { pub app_name: Option<String> }
 #[derive(Serialize)]
 pub struct DeploymentItem { pub id: Uuid, pub app_id: Uuid, pub artifact_url: String, pub status: String }
 
+#[tracing::instrument(level="debug", skip(state, q), fields(filter_app=?q.app_name))]
 pub async fn list_deployments(State(state): State<AppState>, Query(q): Query<DeploymentQuery>) -> ApiResult<Json<Vec<DeploymentItem>>> {
     let pool = state.db.as_ref().ok_or_else(ApiError::service_unavailable)?;
     let rows: Vec<Deployment> = if let Some(app_name) = q.app_name {
