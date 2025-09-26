@@ -13,12 +13,12 @@ fn deploy_creates_artifact_and_respects_ignore() {
     bin().current_dir(root)
         .env("XDG_CACHE_HOME", tmp.path())
         .env("XDG_CONFIG_HOME", tmp.path())
-        .args(["deploy"]) 
+        .args(["deploy","--pack-only"]) 
         .assert()
         .success();
     // find artifact file
     let mut artifact: Option<PathBuf> = None;
-    for e in fs::read_dir(root).unwrap() { let p = e.unwrap().path(); if p.file_name().unwrap().to_string_lossy().starts_with("artifact-") { artifact = Some(p); break; } }
+    for e in fs::read_dir(root).unwrap() { let p = e.unwrap().path(); if p.file_name().unwrap().to_string_lossy().starts_with("app-") { artifact = Some(p); break; } }
     let artifact = artifact.expect("artifact not created");
     let f = fs::File::open(&artifact).unwrap();
     let dec = GzDecoder::new(f); let mut ar = Archive::new(dec);

@@ -30,8 +30,12 @@ pub struct Cli {
 pub enum Commands {
     /// Đăng nhập mock và lưu token local
     Login { #[arg(long)] username: Option<String> },
-    /// Mock deploy ứng dụng NodeJS
-    Deploy { #[arg(long, default_value_t = false)] dry_run: bool },
+    /// Build & package ứng dụng NodeJS (npm install + tạo artifact .tar.gz)
+    Deploy { 
+        #[arg(long, default_value_t = false)] dry_run: bool,
+        /// Chỉ đóng gói, bỏ qua bước npm install (hữu ích cho CI không có Node)
+        #[arg(long, default_value_t = false)] pack_only: bool,
+    },
     /// Mock hiển thị log gần nhất
     Logs { #[arg(long)] app: Option<String> },
     /// Mock liệt kê ứng dụng

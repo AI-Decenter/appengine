@@ -30,7 +30,7 @@ async fn dispatch(cli: Cli, _cfg: EffectiveConfig) -> Result<()> {
     let start = Instant::now();
     let result = match cli.command {
         Commands::Login { username } => { let _span = info_span!("cmd.login").entered(); commands::login::handle(username).await }
-        Commands::Deploy { dry_run } => { let _span = info_span!("cmd.deploy", dry_run); commands::deploy::handle(dry_run).await }
+    Commands::Deploy { dry_run, pack_only } => { let _span = info_span!("cmd.deploy", dry_run, pack_only); commands::deploy::handle(dry_run, pack_only).await }
         Commands::Logs { app } => { let _span = info_span!("cmd.logs"); commands::logs::handle(app).await }
         Commands::List {} => { let _span = info_span!("cmd.list"); commands::list::handle().await }
         Commands::Completions { shell } => { let _span = info_span!("cmd.completions"); commands::completions::handle(shell) }
