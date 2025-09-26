@@ -1,0 +1,68 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: aether-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aether-control-plane
+  namespace: aether-system
+  labels:
+    app: aether-control-plane
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: aether-control-plane
+  template:
+    metadata:
+      labels:
+        app: aether-control-plane
+    spec:
+      containers:
+        - name: control-plane
+          image: ghcr.io/internal/aether/control-plane:0.1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          env:
+            - name: RUST_LOG
+              value: info
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: aether-postgres
+                  key: url
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: aether-control-plane
+  namespace: aether-system
+spec:
+  selector:
+    app: aether-control-plane
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080

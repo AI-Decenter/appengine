@@ -1,0 +1,6 @@
+# CODEOWNERS: Define default owners for code paths.
+# Format: pattern  owners
+
+*       @aether/platform-team
+crates/ @aether/platform-team
+k8s/    @aether/platform-team
