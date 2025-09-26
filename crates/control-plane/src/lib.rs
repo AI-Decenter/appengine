@@ -7,7 +7,7 @@ pub mod telemetry;
 
 use axum::{Router, routing::{get, post}};
 use sqlx::{Pool, Postgres};
-use handlers::{health::health, apps::{list_apps, app_logs, create_app, app_deployments}, deployments::{create_deployment, list_deployments}, readiness::readiness};
+use handlers::{health::health, apps::{list_apps, app_logs, create_app, app_deployments}, deployments::{create_deployment, list_deployments}, readiness::readiness, uploads::upload_artifact};
 use utoipa::OpenApi;
 use crate::telemetry::metrics_handler;
 use axum::response::Html;
@@ -55,7 +55,8 @@ pub fn build_router(state: AppState) -> Router {
     .route("/readyz", get(readiness))
     .route("/startupz", get(handlers::readiness::startupz))
         .route("/metrics", get(metrics_handler))
-        .route("/deployments", post(create_deployment).get(list_deployments))
+    .route("/deployments", post(create_deployment).get(list_deployments))
+    .route("/artifacts", post(upload_artifact))
         .route("/apps", post(create_app))
         .route("/apps", get(list_apps))
         .route("/apps/:app_name/deployments", get(app_deployments))

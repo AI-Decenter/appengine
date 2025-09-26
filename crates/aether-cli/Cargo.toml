@@ -6,6 +6,7 @@ license = "MIT"
 
 [features]
 default = []
+bench_export = []
 
 [dependencies]
 anyhow = { workspace = true }
@@ -30,8 +31,16 @@ glob = "0.3"
 which = "6"
 base64 = "0.22"
 hex = "0.4"
+ed25519-dalek = { workspace = true }
+rand = "0.8"
+
+[[bench]]
+name = "pack_bench"
+harness = false
 
 [dev-dependencies]
+criterion = { workspace = true }
 assert_cmd = "2"
 tempfile = "3"
 proptest = "1"
+axum = { workspace = true }
