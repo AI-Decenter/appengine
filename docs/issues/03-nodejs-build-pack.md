@@ -64,29 +64,61 @@ Logic này sẽ được kích hoạt bởi lệnh `aether deploy`.
   - [x] Test dự án không phải NodeJS trả về lỗi usage (`deploy_non_node.rs`).
   - [x] Test chế độ chỉ đóng gói (`--pack-only`) tạo artifact (`deploy_non_node.rs`).
   - [x] Test dry-run (đã tồn tại trong `cli_basic.rs`).
-  - [ ] Test lỗi `npm install` (chưa thực hiện do CI có thể thiếu `npm`; sẽ bổ sung với mock hoặc skip có điều kiện).
-  - [ ] Test explicit detection helper ở mức unit (có thể tách sau nếu xuất API công khai).
+  - [x] Test lỗi `npm install` (tạo `package.json` hỏng -> kiểm tra exit code runtime / failure path `deploy_npm_fail.rs`).
+  - [ ] Test explicit detection helper ở mức unit (chưa thực hiện – logic hiện đang internal; có thể tách public rồi bổ sung sau).
 - **Kiểm thử Thủ công (pending/manual):**
   - [ ] Chạy `npm init -y && aether deploy` để xác thực install thật nếu môi trường có Node.
   - [ ] Giải nén artifact và xác minh `node_modules` hiện diện khi không dùng `--pack-only`.
 
-### 5. Ghi chú Hiện Trạng
-- Chức năng build & package NodeJS cơ bản: HOÀN THÀNH.
-- Thêm cờ `--pack-only` để hỗ trợ CI không có `npm`.
-- Artifact đặt tên theo hash nội dung (`app-<sha256>.tar.gz`).
-- Tự động loại trừ artifact cũ (`app-*` & `artifact-*`).
+### 5. Ghi chú Hiện Trạng (Cập nhật)
+- Phần cốt lõi ban đầu: HOÀN THÀNH.
+- ĐÃ TRIỂN KHAI thêm tất cả hạng mục mở rộng (trừ upload thật sự):
+  * Prune devDependencies (`npm prune --production`).
+  * Phát hiện package manager: pnpm > yarn > npm (dựa trên lockfile & binary tồn tại).
+  * Cache `node_modules` theo hash lockfile + `NODE_VERSION` (copy restore/save).
+  * Streaming hash & tar (đọc chunk 64KB, song song cập nhật băm toàn cục + từng file).
+  * Flag `--compression-level` (1–9) điều chỉnh gzip.
+  * Hợp nhất `.gitignore` + `.aetherignore` (cảnh báo pattern lỗi).
+  * Flag `--out` chọn thư mục / file đích.
+  * Sinh manifest JSON `<artifact>.manifest.json` (path, size, sha256, tổng số file, tổng kích thước).
+  * Test lỗi npm hỏng (`deploy_npm_fail.rs`).
+  * Thêm flags mới: `--no-upload`, `--no-cache`.
+- Upload hiện tại: MOCK (ghi log nếu có `AETHER_API_BASE`), CHƯA gọi Control Plane thật.
+- Artifact vẫn tên mặc định `app-<sha256>.tar.gz` nếu không chỉ định `--out`.
+- Manifest đặt cạnh artifact, ví dụ: `app-<sha>.tar.gz.manifest.json`.
+- Đã cập nhật các tests: `deploy_artifact.rs`, `deploy_out_and_manifest.rs`, `deploy_npm_fail.rs`, `deploy_cache.rs`.
 
-### 6. Hướng Phát Triển / Nâng Cấp Tiếp Theo
-1. Thêm bước prune devDependencies: `npm prune --production` sau install.
-2. Hỗ trợ Yarn / PNPM detection (lockfile ưu tiên: `pnpm-lock.yaml`, `yarn.lock`, `package-lock.json`).
-3. Cache `node_modules` giữa các lần deploy (hash package-lock + NODE_VERSION làm key).
-4. Streaming nén & băm đồng thời để tránh đọc toàn bộ file lớn vào RAM.
-5. Thêm cấu hình `compression-level` (gzip level 1-9) qua flag hoặc config.
-6. Cho phép exclude mặc định mở rộng: `.gitignore` merge với `.aetherignore`.
-7. Thêm flag `--out <path>` chỉ định tên hoặc thư mục artifact.
-8. Xuất manifest JSON (liệt kê file + hash) kèm artifact để phục vụ SBOM sau này.
-9. Kiểm thử npm lỗi: tạo `package.json` hỏng và assert exit code runtime (skip nếu thiếu npm).
-10. Tích hợp upload artifact lên Control Plane (khi API sẵn) thay vì chỉ local.
+### 6. Hạng Mục Mở Rộng (Trạng Thái)
+| # | Mục | Trạng thái | Ghi chú |
+|---|-----|------------|---------|
+| 1 | Prune devDependencies | ✅ | `npm prune --production` sau install (npm) |
+| 2 | Yarn / PNPM detection | ✅ | Ưu tiên pnpm > yarn > npm; fallback npm |
+| 3 | Cache `node_modules` | ✅ | Key: SHA256(lockfile + NODE_VERSION); copy-based |
+| 4 | Streaming hash + tar | ✅ | Chunk 64KB; hashing đồng thời toàn cục & từng file |
+| 5 | `--compression-level` | ✅ | Giới hạn 1–9, fallback default nếu invalid |
+| 6 | Merge `.gitignore` | ✅ | Cảnh báo pattern lỗi; cộng dồn cùng `.aetherignore` |
+| 7 | `--out <path>` | ✅ | Hỗ trợ dir, dir với '/', hoặc file cụ thể |
+| 8 | Manifest JSON | ✅ | `<artifact>.manifest.json` (file list + per-file sha256) |
+| 9 | Test lỗi npm | ✅ | `deploy_npm_fail.rs` kiểm tra fail path |
+| 10 | Upload Control Plane thật | ⏳ | HIỆN TẠI MOCK (log); cần API spec để hoàn thiện |
 
-### 7. Kết Luận
-Issue #3 đã HOÀN THÀNH phạm vi cốt lõi. Các mục còn lại được chuyển sang “Hướng Phát Triển”.
+### 7. TODO & Follow-ups Đề Xuất
+1. Tích hợp upload thật (multipart / signed URL) khi Control Plane có endpoint.
+2. Chuẩn hoá manifest: thêm overall hash, version schema, format version.
+3. SBOM / SPDX hoặc CycloneDX generation (tận dụng manifest hiện có).
+4. Tối ưu cache: dùng hardlink / reflink thay vì copy; tùy chọn `--cache-dir` tùy chỉnh.
+5. Thêm unit tests riêng cho: `detect_package_manager`, `cache_key`, logic merge ignore.
+6. Thêm benchmark (criterion) cho packaging với nhiều file & so sánh các mức nén.
+7. Thêm flag `--format json` cho output CLI để script dễ parse (artifact path, digest, manifest path).
+8. Thêm lựa chọn `--include-dev` để bỏ qua prune khi cần build-step devDependencies.
+9. Cân nhắc loại bỏ dependencies chưa dùng (`base64`, `hex`) hoặc dùng cho hash encoding thống nhất.
+10. Thêm chữ ký (signature) cho artifact + manifest (Ed25519) -> chuẩn bị bước supply chain security.
+11. Thêm kiểm tra kích thước tối đa artifact & cảnh báo nếu vượt ngưỡng cấu hình.
+12. Cải thiện xử lý pattern ignore kiểu directory (tự động append `/` nếu cần).
+
+### 8. Kết Luận (Cập nhật)
+Phạm vi mở rộng từ danh sách “Hướng Phát Triển” (1–9) đã hoàn tất đầy đủ. Chỉ còn lại bước upload thực sự (mục 10) và các follow-ups nâng chất bảo mật, hiệu năng, chuẩn hoá.
+
+_Lịch sử_: Bản ban đầu chỉ build + package. Hiện tại lệnh `aether deploy` đã trở thành pipeline mini: detect PM -> (cache restore) -> install -> prune -> package (stream + hash) -> manifest -> (mock upload).
+
+Trạng thái tổng: CORE ✅  | ENHANCEMENTS ✅ (trừ upload thật) | UPLOAD THẬT ⏳
