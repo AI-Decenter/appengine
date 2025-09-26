@@ -1,0 +1,27 @@
+###############################################
+# cargo-deny configuration (baseline)
+###############################################
+
+[advisories]
+ignore = []
+severity-threshold = "medium"
+
+[licenses]
+unlicensed = "deny"
+allow = [
+    "MIT", "Apache-2.0", "BSD-3-Clause", "BSD-2-Clause", "ISC", "Unicode-DFS-2016", "Zlib"
+]
+deny = ["AGPL-3.0", "GPL-3.0", "GPL-2.0"]
+copyleft = "warn"
+default = "deny"
+confidence-threshold = 0.8
+
+[bans]
+highlight = "all"
+wildcards = "allow"
+multiple-versions = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com", "https://crates.io"]

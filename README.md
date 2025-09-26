@@ -1,1 +1,178 @@
-# appengine
+# AetherEngine (MVP v1.0)
+
+An internal Platform-as-a-Service (PaaS) designed to minimize application deployment latency and systematically elevate Developer Experience (DX) by transferring the entirety of the build pipeline (dependency resolution, compilation, packaging) to the client edge through a high‑performance Rust CLI. Rather than executing non‑deterministic server‑side builds, developers upload a pre‑assembled, production‑ready artifact. This model is intended to reduce end‑to‑end deployment latency from minutes to seconds while decreasing infrastructure consumption and variance.
+
+---
+
+## 1. Executive Overview
+
+AetherEngine provides an opinionated, artifact‑centric deployment paradigm initially constrained to Node.js Long-Term Support (LTS) runtimes (e.g. 18.x, 20.x). The Minimum Viable Product (MVP) aims to empirically demonstrate an ≥80% reduction in mean deployment time for existing internal Node.js services relative to the incumbent pipeline.
+
+### MVP Success Criteria
+* Business: ≥80% reduction in p95 deploy duration versus baseline.
+* Product: A cohesive workflow—from local source to production runtime—achieved through 3–5 intuitive CLI commands.
+* Technical: A stable, horizontally extensible control plane (Rust + Axum + SQLx + PostgreSQL) and operational data plane (Kubernetes) supporting artifact‑based rollouts.
+
+> Historical Note: Early exploratory drafts referenced TiDB. The authoritative MVP datastore is PostgreSQL (SQLx). TiDB may re‑enter the roadmap for multi‑region or HTAP scenarios.
+
+---
+
+## 2. High-Level Architecture
+
+The platform decomposes into four bounded components:
+
+| Component | Role | Core Technologies |
+|-----------|------|-------------------|
+| Aether CLI | Local build, packaging, artifact upload, deployment orchestration | Rust, clap, reqwest, tokio |
+| Control Plane | API surface, deployment metadata, orchestration, Kubernetes integration | Rust, Axum, SQLx, PostgreSQL, kube-rs |
+| Artifact Registry | Immutable storage for packaged application artifacts | S3-compatible object storage (e.g. MinIO) |
+| Data Plane | Deterministic execution environment for runtime containers | Kubernetes, optimized Node.js base images |
+
+### Deployment Flow (Node.js)
+1. Developer executes `aether deploy` at the project root.
+2. CLI detects Node.js project (presence of `package.json`).
+3. Runs `npm install --production` (or a deterministic equivalent) locally.
+4. Packages source + `node_modules` into a compressed artifact (`app.tar.gz`).
+5. Requests a pre‑signed upload URL from the Control Plane.
+6. Uploads the artifact to the Artifact Registry.
+7. Issues a deployment request (`POST /deployments`) containing artifact digest + runtime metadata.
+8. Control Plane persists deployment record and synthesizes a Kubernetes workload specification.
+9. Data Plane init container downloads & decompresses the artifact.
+10. Main container (base image: `aether-nodejs:20-slim`) executes the defined start command (default: `npm start`).
+
+### Core Principles
+* Artifact Immutability & Addressability (content hash).
+* Deterministic Local Build (eliminating CI variability).
+* Minimal Server Trust Surface (no remote build execution).
+* Observability‑first (deployment UUID + digest propagation across logs / traces).
+
+---
+
+## 3. CLI (Aether CLI)
+
+| Command | Purpose | Notes |
+|---------|---------|-------|
+| `aether login` | Authenticate user; store credential securely | Supports token rotation |
+| `aether deploy` | Package & publish artifact; trigger deployment | Auto runtime detection, hash computation |
+| `aether logs` | Stream live or historical logs | Pod label selectors |
+| `aether list` | Enumerate applications & recent deployments | Future: filtering & pagination |
+
+Planned Enhancements:
+* Parallel compression + hashing for large dependency graphs
+* Local SBOM generation (supply chain visibility)
+* Integrity verification before runtime entrypoint execution
+
+---
+
+## 4. Control Plane
+
+Responsibilities:
+* REST API (Axum) for authentication, deployment management, log access
+* Artifact metadata tracking (digest, runtime, size, provenance timestamps)
+* Kubernetes workload synthesis via `kube-rs`
+* Enforcement of environment, secret, and resource policies
+
+Representative Endpoints (MVP subset):
+* `POST /deployments` – Register new deployment (idempotent via artifact digest)
+* `GET /apps/{app}/logs` – Stream or tail logs (upgrade: WebSocket or chunked HTTP)
+* `GET /apps/{app}/deployments` – List historical deployments
+* `GET /healthz`, `GET /readyz` – Liveness / readiness probes
+
+---
+
+## 5. Artifact Registry
+
+Initial Target: Self‑hosted MinIO (S3-compatible API).
+
+Requirements:
+* Pre‑signed URL issuance (time‑boxed; ideally single‑use)
+* Content-addressed hierarchy (e.g. `artifacts/<app>/<sha256>/app.tar.gz`)
+* Optional server-side encryption (future)
+* Lifecycle policies: Age + unreferenced digest reclamation
+
+---
+
+## 6. Data Plane
+
+Kubernetes Design:
+* Init Container: Fetch + decompress artifact into ephemeral volume (EmptyDir or ephemeral CSI)
+* Main Container: Execute Node.js process (non-root user) with env injection
+* Rollout Strategy (MVP): Replace; roadmap includes canary + blue/green
+* Observability: Standardized labels `app=aether, app_name=<name>, deployment_id=<uuid>`
+
+Base Image Objectives:
+* Slim, reproducible, frequently patched
+* Non-root (USER 1000)
+* Reduced attack surface (no build toolchain in runtime layer)
+
+---
+
+## 7. Data Model (Concise Overview)
+
+Tables (PostgreSQL via SQLx):
+* `applications(id, name, owner, created_at)`
+* `artifacts(id, app_id, digest, runtime, size_bytes, created_at)`
+* `deployments(id, app_id, artifact_id, status, rollout_started_at, rollout_completed_at)`
+* `deployment_events(id, deployment_id, phase, message, timestamp)`
+* `users(id, email, auth_provider, created_at)`
+
+---
+
+## 8. Security & Integrity (MVP Orientation)
+* Transport Security: HTTPS/TLS enforced for Control Plane + artifact operations.
+* Authentication: Short‑lived bearer tokens acquired via `aether login`.
+* Authorization: Ownership / role validation on mutating endpoints.
+* Integrity: SHA‑256 digest validation at deploy time + (optionally) runtime recheck.
+* Isolation: Single shared namespace initially; namespace-per-application in roadmap.
+
+---
+
+## 9. Roadmap (Illustrative Post-MVP Trajectory)
+
+| Theme | Enhancement |
+|-------|-------------|
+| Multi-Runtime | Python, Go, JVM adapters |
+| Progressive Delivery | Canary, automated rollback on SLO breach |
+| Observability | Structured event streaming, OpenTelemetry tracing |
+| Policy | OPA integration, admission control gates |
+| Supply Chain | Artifact signing (Cosign), provenance attestations |
+| Scalability | Sharded registry, multi-cluster scheduling |
+
+---
+
+## 10. Local Development Environment
+
+Detailed procedures are specified in `DEVELOPMENT.md`. A provisioning and verification script `dev.sh` automates environment bootstrap (Rust toolchain, Docker, MicroK8s, PostgreSQL container) and readiness checks.
+
+Quick Start:
+1. Ensure Linux host with Docker + Snap available.
+2. Execute `./dev.sh bootstrap` (installs or configures missing components where feasible).
+3. Run `./dev.sh verify` to confirm environment readiness.
+
+---
+
+## 11. Contributing Guidelines
+* Adopt conventional commits (`feat:`, `fix:`, `docs:`, `refactor:` etc.).
+* Run `cargo fmt` and `cargo clippy --all-targets --all-features -D warnings` pre‑PR.
+* Provide architectural rationale in PR descriptions for substantial changes.
+* Maintain backward compatibility for any published CLI flags until a deprecation path is documented.
+
+---
+
+## 12. Licensing & Ownership
+Internal proprietary platform (license designation TBD). All code, documentation, and artifacts are confidential. External distribution prohibited without explicit authorization.
+
+---
+
+## 13. Contact & Operational Support
+* Architecture Lead: (TBD)
+* Platform Engineering Channel: (internal) `#aether-engine`
+* Incident Escalation: On-call rotation (TBD)
+
+---
+
+## 14. Document History
+
+| Version | Date | Author | Notes |
+|---------|------|--------|-------|
+| 1.0 (MVP Draft) | 2025-09-19 | Initial Compilation | First canonical English architecture document |

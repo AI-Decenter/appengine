@@ -1,0 +1,11 @@
+target/
+**/target/
+*.swp
+*.log
+.DS_Store
+node_modules/
+.env*
+!/appengine/.env.example
+Cargo.lock
+sqlx-data.json
+coverage/

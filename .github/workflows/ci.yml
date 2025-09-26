@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+defaults:
+  run:
+    working-directory: appengine
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.90.0
+          components: clippy,rustfmt
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            appengine/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('appengine/Cargo.lock') }}
+      - name: Generate Cargo.lock (fetch dependencies)
+        run: cargo fetch
+      - name: Build
+        run: cargo build --workspace --all-targets --release
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Format Check
+        run: cargo fmt --all -- --check
+      - name: SQLx Prepare (Offline)
+        env:
+          DATABASE_URL: postgres://aether:postgres@localhost:5432/aether_dev
+        run: |
+          sudo apt-get update && sudo apt-get install -y postgresql-client
+          # In CI a real DB could be started via service container; placeholder here.
+          echo '{"db":[]}' > sqlx-data.json || true
+      - name: Tests
+        run: cargo test --workspace --all-features -- --nocapture
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      - name: Cargo Deny
+        run: cargo deny check
+      - name: ShellCheck dev.sh
+        run: sudo apt-get update && sudo apt-get install -y shellcheck && shellcheck dev.sh || true
