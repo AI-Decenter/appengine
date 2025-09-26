@@ -56,6 +56,19 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_DB: aether_dev
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" \
+          --health-interval 5s \
+          --health-timeout 5s \
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust toolchain
@@ -70,9 +83,26 @@ jobs:
             ~/.cargo/git
             target
           key: test-${{ matrix.os }}-${{ hashFiles('Cargo.lock') }}
+      - name: Wait for Postgres (Linux only)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          for i in {1..30}; do
+            pg_isready -h 127.0.0.1 -U postgres && break
+            sleep 1
+          done
+      - name: Install sqlx-cli
+        run: cargo install sqlx-cli --no-default-features --features native-tls,postgres
+      - name: Run migrations
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/aether_dev
+        run: sqlx migrate run -p crates/control-plane
       - name: Build (debug)
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/aether_dev
         run: cargo build --workspace --all-targets
       - name: Run tests (full)
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/aether_dev
         run: cargo test --workspace --all-features -- --nocapture
       - name: Focused exit code tests
         run: cargo test -p aether-cli --test exit_codes -- --nocapture
@@ -86,6 +116,13 @@ jobs:
           if-no-files-found: warn
       - name: Report binary size
         run: ls -lh target/release/aether-cli || true
+      - name: sqlx prepare (offline cache)
+        if: matrix.os == 'ubuntu-latest'
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/aether_dev
+        run: |
+          cargo sqlx prepare --workspace -- --all-targets
+          git diff --name-only --exit-code sqlx-data.json || { echo 'sqlx-data.json not updated. Please commit.'; exit 1; }
 
   coverage:
     name: Coverage (llvm-cov)
