@@ -18,5 +18,5 @@ chrono = { workspace = true }
 thiserror = { workspace = true }
 once_cell = { workspace = true }
 k8s-openapi = { version = "0.21", features = ["v1_28"] }
-tower = "0.4"
+tower = { version = "0.4", features = ["util"] }
 
