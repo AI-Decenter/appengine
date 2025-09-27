@@ -52,6 +52,8 @@ jobs:
     name: Tests (Linux + DB)
     needs: lint
     runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/aether_dev
     services:
       postgres:
         image: postgres:15
@@ -85,17 +87,11 @@ jobs:
       - name: Install sqlx-cli
         run: cargo install sqlx-cli --no-default-features --features native-tls,postgres
       - name: Run migrations
-        env:
-          DATABASE_URL: postgres://postgres:postgres@localhost:5432/aether_dev
         working-directory: crates/control-plane
         run: sqlx migrate run
       - name: Build (debug)
-        env:
-          DATABASE_URL: postgres://postgres:postgres@localhost:5432/aether_dev
         run: cargo build --workspace --all-targets
       - name: Run tests (full)
-        env:
-          DATABASE_URL: postgres://postgres:postgres@localhost:5432/aether_dev
         run: cargo test --workspace --all-features -- --nocapture
       - name: Focused exit code tests
         run: cargo test -p aether-cli --test exit_codes -- --nocapture
@@ -110,8 +106,6 @@ jobs:
       - name: Report binary size
         run: ls -lh target/release/aether-cli || true
       - name: sqlx prepare (offline cache)
-        env:
-          DATABASE_URL: postgres://postgres:postgres@localhost:5432/aether_dev
         run: |
           cargo sqlx prepare --workspace -- --all-targets
           git diff --name-only --exit-code sqlx-data.json || { echo 'sqlx-data.json not updated. Please commit.'; exit 1; }

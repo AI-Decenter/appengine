@@ -9,6 +9,8 @@ on:
 jobs:
   build-test:
     runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/aether_dev
     services:
       postgres:
         image: postgres:15
@@ -45,27 +47,17 @@ jobs:
       - name: Generate Cargo.lock (fetch dependencies)
         run: cargo fetch
       - name: Run migrations
-        env:
-          DATABASE_URL: postgres://postgres:postgres@localhost:5432/aether_dev
         working-directory: crates/control-plane
         run: sqlx migrate run
       - name: Build
-        env:
-          DATABASE_URL: postgres://postgres:postgres@localhost:5432/aether_dev
         run: cargo build --workspace --all-targets --release
       - name: Clippy
-        env:
-          DATABASE_URL: postgres://postgres:postgres@localhost:5432/aether_dev
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: SQLx Prepare (Offline)
-        env:
-          DATABASE_URL: postgres://postgres:postgres@localhost:5432/aether_dev
         run: |
           sudo apt-get update && sudo apt-get install -y postgresql-client
           cargo sqlx prepare --workspace -- --all-targets
       - name: Tests
-        env:
-          DATABASE_URL: postgres://postgres:postgres@localhost:5432/aether_dev
         run: cargo test --workspace --all-features -- --nocapture
       - name: Install cargo-deny
         uses: taiki-e/install-action@v2
