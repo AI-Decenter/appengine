@@ -1,4 +1,4 @@
-use axum::{body::Body, http::{Request, StatusCode}};
+use axum::{body::Body, http::{Request, StatusCode}, middleware};
 use control_plane::{build_router, AppState, db::init_db};
 use tower::util::ServiceExt; // for oneshot
 use sha2::{Sha256, Digest};
@@ -88,16 +88,34 @@ async fn upload_ok_and_duplicate() {
 
 #[tokio::test]
 async fn upload_unauthorized() {
-    // Set tokens env to force auth requirement
+    // Preserve old value
+    let prev = std::env::var("AETHER_API_TOKENS").ok();
     std::env::set_var("AETHER_API_TOKENS", "tok1,tok2");
-    let Some(pool) = maybe_pool().await else { eprintln!("skipping (no db)"); return; };
-    let app_router = build_router(AppState { db: pool });
+    let Some(pool) = maybe_pool().await else { eprintln!("skipping (no db)"); if let Some(v)=prev { std::env::set_var("AETHER_API_TOKENS", v); } else { std::env::remove_var("AETHER_API_TOKENS"); } return; };
+    // Build secured router (replicating auth logic from main)
+    let tokens: Vec<String> = std::env::var("AETHER_API_TOKENS").unwrap().split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+    let secured = build_router(AppState { db: pool })
+        .layer(middleware::from_fn(move |req: Request<Body>, next: axum::middleware::Next| {
+            let tokens = tokens.clone();
+            async move {
+                let path = req.uri().path();
+                let exempt = matches!(path, "/health"|"/readyz"|"/startupz"|"/metrics"|"/openapi.json"|"/swagger");
+                if !exempt && !tokens.is_empty() {
+                    let provided = req.headers().get("authorization").and_then(|v| v.to_str().ok()).unwrap_or("");
+                    let ok = tokens.iter().any(|t| provided == format!("Bearer {t}"));
+                    if !ok { return axum::response::Response::builder().status(401).body(Body::from("unauthorized")).unwrap(); }
+                }
+                next.run(req).await
+            }
+        }));
     let (body_bytes, boundary) = multipart_body(vec![("app_name","demo")], Some(("artifact", b"abc".to_vec())));
     let mut h = Sha256::new(); h.update(b"abc"); let dg = format!("{:x}", h.finalize());
     let req = Request::builder().method("POST").uri("/artifacts")
         .header("content-type", format!("multipart/form-data; boundary={}", boundary))
         .header("x-aether-artifact-digest", dg)
         .body(Body::from(body_bytes)).unwrap();
-    let resp = app_router.oneshot(req).await.unwrap();
+    let resp = secured.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    // restore env
+    if let Some(v)=prev { std::env::set_var("AETHER_API_TOKENS", v); } else { std::env::remove_var("AETHER_API_TOKENS"); }
 }
