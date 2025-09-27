@@ -26,12 +26,12 @@ async fn maybe_pool() -> Option<sqlx::Pool<sqlx::Postgres>> {
 async fn ensure_schema(pool: &sqlx::Pool<sqlx::Postgres>) {
     // Basic presence checks for required tables
     let required = ["applications", "artifacts", "public_keys", "deployments"];
-    for table in required { 
-        // Use information_schema to detect existence without failing on empty
-        let exists: Option<i64> = sqlx::query_scalar(
-            "SELECT 1::BIGINT FROM information_schema.tables WHERE table_schema = 'public' AND table_name = $1"
-        ).bind(table).fetch_optional(pool).await.unwrap();
-        assert!(exists.is_some(), "required table '{}' missing (run migrations)", table);
+    for table in required {
+        // Use EXISTS so we get a stable BOOL type (avoids any INT4/INT8 decode mismatches)
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name=$1)"
+        ).bind(table).fetch_one(pool).await.unwrap();
+        assert!(exists, "required table '{}' missing (run migrations)", table);
     }
     // Column-level check for artifacts (extended for Issue 03)
     let cols: Vec<String> = sqlx::query_scalar(
