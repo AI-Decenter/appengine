@@ -45,19 +45,33 @@ pub struct PresignResponse { pub upload_url: String, pub storage_key: String, pu
 pub async fn presign_artifact(State(state): State<AppState>, Json(req): Json<PresignRequest>) -> impl IntoResponse {
     if req.app_name.trim().is_empty() { return ApiError::bad_request("app_name required").into_response(); }
     if req.digest.len()!=64 || !req.digest.chars().all(|c| c.is_ascii_hexdigit()) { return ApiError::new(StatusCode::BAD_REQUEST, "invalid_digest", "digest must be 64 hex").into_response(); }
-    // idempotent: if artifact already exists return dummy presign (already stored)
-    if let Ok(Some(_existing)) = sqlx::query_scalar::<_, String>("SELECT id::text FROM artifacts WHERE digest=$1")
-        .bind(&req.digest).fetch_optional(&state.db).await {
-        let headers = std::collections::HashMap::new();
-        return (StatusCode::OK, Json(PresignResponse { upload_url: String::new(), storage_key: String::new(), method: "NONE".into(), headers })).into_response();
+    // Check existing artifact row
+    if let Ok(Some((_id,status, sk))) = sqlx::query_as::<_, (String,String,Option<String>)>(
+        "SELECT id::text, status, storage_key FROM artifacts WHERE digest=$1")
+        .bind(&req.digest)
+        .fetch_optional(&state.db).await {
+        if status == "stored" {
+            let headers = std::collections::HashMap::new();
+            return (StatusCode::OK, Json(PresignResponse { upload_url: String::new(), storage_key: sk.unwrap_or_default(), method: "NONE".into(), headers })).into_response();
+        } else {
+            let bucket = std::env::var("AETHER_ARTIFACT_BUCKET").unwrap_or_else(|_| "artifacts".into());
+            let key = sk.unwrap_or_else(|| format!("artifacts/{}/{}/app.tar.gz", req.app_name, req.digest));
+            let base_url = std::env::var("AETHER_S3_BASE_URL").unwrap_or_else(|_| "http://minio.local:9000".into());
+            let upload_url = format!("{}/{}/{}", base_url.trim_end_matches('/'), bucket, key);
+            let mut headers = std::collections::HashMap::new(); headers.insert("x-amz-acl".into(), "private".into());
+            return (StatusCode::OK, Json(PresignResponse { upload_url, storage_key: key, method: "PUT".into(), headers })).into_response();
+        }
     }
+    // Create new pending record
     let bucket = std::env::var("AETHER_ARTIFACT_BUCKET").unwrap_or_else(|_| "artifacts".into());
     let key = format!("artifacts/{}/{}/app.tar.gz", req.app_name, req.digest);
-    // For now, mock presign (future: real S3/MinIO presign). Accept simple base URL env.
     let base_url = std::env::var("AETHER_S3_BASE_URL").unwrap_or_else(|_| "http://minio.local:9000".into());
     let upload_url = format!("{}/{}/{}", base_url.trim_end_matches('/'), bucket, key);
-    let mut headers = std::collections::HashMap::new();
-    headers.insert("x-amz-acl".into(), "private".into());
+    let mut headers = std::collections::HashMap::new(); headers.insert("x-amz-acl".into(), "private".into());
+    let _ = sqlx::query("INSERT INTO artifacts (app_id, digest, size_bytes, signature, sbom_url, manifest_url, verified, storage_key, status) VALUES (NULL,$1,0,NULL,NULL,NULL,FALSE,$2,'pending') ON CONFLICT (digest) DO NOTHING")
+        .bind(&req.digest)
+        .bind(&key)
+        .execute(&state.db).await;
     (StatusCode::OK, Json(PresignResponse { upload_url, storage_key: key, method: "PUT".into(), headers })).into_response()
 }
 
@@ -77,7 +91,7 @@ pub async fn complete_artifact(State(state): State<AppState>, Json(req): Json<Co
     if req.size_bytes < 0 { return ApiError::bad_request("size_bytes must be >= 0").into_response(); }
 
     let signature = req.signature.clone();
-    let storage_key = format!("artifacts/{}/{}/app.tar.gz", req.app_name, req.digest);
+    let key = format!("artifacts/{}/{}/app.tar.gz", req.app_name, req.digest);
 
     // DB connection
     let mut conn = match state.db.acquire().await { Ok(c)=>c, Err(e)=> { error!(?e, "acquire_conn"); return ApiError::internal("db").into_response(); } };
@@ -87,19 +101,45 @@ pub async fn complete_artifact(State(state): State<AppState>, Json(req): Json<Co
         .bind(&req.app_name)
         .fetch_optional(&mut *conn).await.ok().flatten();
 
-    // Idempotent: if already stored return duplicate flag
-    if let Ok(Some((id, verified, existing_key, status))) = sqlx::query_as::<_, (Uuid,bool,Option<String>,String)>(
-        "SELECT id, verified, storage_key, status FROM artifacts WHERE digest=$1")
+    // Check if artifact exists
+    let existing = sqlx::query_as::<_, (Uuid,bool,Option<String>,String)>("SELECT id, verified, storage_key, status FROM artifacts WHERE digest=$1")
         .bind(&req.digest)
-        .fetch_optional(&mut *conn).await {
-        return (StatusCode::OK, Json(CompleteResponse {
-            artifact_id: id.to_string(),
-            digest: req.digest,
-            duplicate: true,
-            verified,
-            storage_key: existing_key.unwrap_or_default(),
-            status,
-        })).into_response();
+        .fetch_optional(&mut *conn).await.ok().flatten();
+    if let Some((id, verified_prev, sk, status)) = &existing {
+        if status == "stored" {
+            return (StatusCode::OK, Json(CompleteResponse {
+                artifact_id: id.to_string(),
+                digest: req.digest.clone(),
+                duplicate: true,
+                verified: *verified_prev,
+                storage_key: sk.clone().unwrap_or_default(),
+                status: status.clone(),
+            })).into_response();
+        } else if status == "pending" {
+            // Update pending record with final size and optional signature
+            let upd = sqlx::query("UPDATE artifacts SET app_id=$1, size_bytes=$2, signature=$3, verified=$4, storage_key=$5, status='stored' WHERE id=$6 RETURNING verified")
+                .bind(app_id)
+                .bind(req.size_bytes)
+                .bind(signature.as_ref())
+                .bind(false) // pending completions are never verified
+                .bind(&key)
+                .bind(id)
+                .fetch_one(&mut *conn).await;
+            match upd {
+                Ok(r) => {
+                    let final_verified: bool = r.get(0);
+                    return (StatusCode::OK, Json(CompleteResponse {
+                        artifact_id: id.to_string(),
+                        digest: req.digest,
+                        duplicate: false,
+                        verified: final_verified,
+                        storage_key: key,
+                        status: "stored".into(),
+                    })).into_response();
+                }
+                Err(e) => { error!(?e, "update_artifact_failed"); return ApiError::internal("db update").into_response(); }
+            }
+        }
     }
 
     // Signature verification (optional)
@@ -133,16 +173,16 @@ pub async fn complete_artifact(State(state): State<AppState>, Json(req): Json<Co
     }
 
     // Insert metadata (status: stored)
-    let inserted = sqlx::query("INSERT INTO artifacts (app_id, digest, size_bytes, signature, sbom_url, manifest_url, verified, storage_key, status) VALUES ($1,$2,$3,$4,NULL,NULL,$5,$6,'stored') RETURNING id")
+    let ins = sqlx::query("INSERT INTO artifacts (app_id, digest, size_bytes, signature, sbom_url, manifest_url, verified, storage_key, status) VALUES ($1,$2,$3,$4,NULL,NULL,$5,$6,'stored') RETURNING id")
         .bind(app_id)
         .bind(&req.digest)
         .bind(req.size_bytes)
         .bind(signature.as_ref())
         .bind(verified) // $5 verified
-        .bind(&storage_key) // $6 storage_key
+        .bind(&key) // $6 storage_key
         .fetch_one(&mut *conn).await;
 
-    match inserted {
+    match ins {
         Ok(row) => {
             let id: Uuid = row.get(0);
             ARTIFACTS_TOTAL.inc();
@@ -151,7 +191,7 @@ pub async fn complete_artifact(State(state): State<AppState>, Json(req): Json<Co
                 digest: req.digest,
                 duplicate: false,
                 verified,
-                storage_key,
+                storage_key: key,
                 status: "stored".into(),
             })).into_response()
         }
@@ -309,7 +349,7 @@ pub struct UploadResponse { pub artifact_url: String, pub digest: String, pub du
 /// HEAD existence check for artifact by digest
 pub async fn head_artifact(State(state): State<AppState>, Path(digest): Path<String>) -> impl IntoResponse {
     if digest.len()!=64 || !digest.chars().all(|c| c.is_ascii_hexdigit()) { return StatusCode::BAD_REQUEST; }
-    let exists = sqlx::query_scalar::<_, i64>("SELECT 1 FROM artifacts WHERE digest=$1")
+    let exists = sqlx::query_scalar::<_, i64>("SELECT 1 FROM artifacts WHERE digest=$1 AND status='stored'")
         .bind(&digest)
         .fetch_optional(&state.db).await.ok().flatten().is_some();
     if exists { StatusCode::OK } else { StatusCode::NOT_FOUND }

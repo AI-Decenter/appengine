@@ -29,16 +29,15 @@ async fn ensure_schema(pool: &sqlx::Pool<sqlx::Postgres>) {
     for table in required { 
         // Use information_schema to detect existence without failing on empty
         let exists: Option<i64> = sqlx::query_scalar(
-            "SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = $1"
+            "SELECT 1::BIGINT FROM information_schema.tables WHERE table_schema = 'public' AND table_name = $1"
         ).bind(table).fetch_optional(pool).await.unwrap();
         assert!(exists.is_some(), "required table '{}' missing (run migrations)", table);
     }
-    // Column-level check for artifacts
+    // Column-level check for artifacts (extended for Issue 03)
     let cols: Vec<String> = sqlx::query_scalar(
         "SELECT column_name FROM information_schema.columns WHERE table_name='artifacts' ORDER BY ordinal_position"
     ).fetch_all(pool).await.unwrap();
-    let expected = ["id","app_id","digest","size_bytes","signature","sbom_url","manifest_url","verified","created_at"];
-    for e in expected { assert!(cols.contains(&e.to_string()), "artifacts column '{}' missing", e); }
+    for e in ["id","app_id","digest","size_bytes","signature","sbom_url","manifest_url","verified","storage_key","status","created_at"] { assert!(cols.contains(&e.to_string()), "artifacts column '{}' missing", e); }
 }
 
 fn multipart_body(fields: Vec<(&str, &str)>, file: Option<(&str, Vec<u8>)>) -> (Vec<u8>, String) {
@@ -239,4 +238,42 @@ async fn upload_unauthorized() {
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     // restore env
     if let Some(v)=prev { std::env::set_var("AETHER_API_TOKENS", v); } else { std::env::remove_var("AETHER_API_TOKENS"); }
+}
+
+#[tokio::test]
+async fn presign_creates_pending_and_head_not_found_until_complete() {
+    let Some(pool) = maybe_pool().await else { eprintln!("skipping (no db)"); return; };
+    ensure_schema(&pool).await;
+    sqlx::query("DELETE FROM artifacts").execute(&pool).await.ok();
+    sqlx::query("DELETE FROM applications").execute(&pool).await.ok();
+    sqlx::query("INSERT INTO applications (name) VALUES ($1)").bind("pendingapp").execute(&pool).await.unwrap();
+    let app = build_router(AppState { db: pool.clone() });
+    let digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string();
+    // Presign
+    let body = serde_json::json!({"app_name":"pendingapp","digest":digest}).to_string();
+    let req = Request::builder().method("POST").uri("/artifacts/presign")
+        .header("content-type","application/json")
+        .body(Body::from(body)).unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    // HEAD should be 404 (not stored yet)
+    let head_req = Request::builder().method("HEAD").uri(format!("/artifacts/{}", digest)).body(Body::empty()).unwrap();
+    let head_resp = app.clone().oneshot(head_req).await.unwrap();
+    assert_eq!(head_resp.status(), StatusCode::NOT_FOUND);
+    // Row status should be pending
+    let status: String = sqlx::query_scalar("SELECT status FROM artifacts WHERE digest=$1").bind(&digest).fetch_one(&pool).await.unwrap();
+    assert_eq!(status, "pending");
+    // Complete
+    let comp_body = serde_json::json!({"app_name":"pendingapp","digest":digest,"size_bytes":42,"signature":null}).to_string();
+    let comp_req = Request::builder().method("POST").uri("/artifacts/complete")
+        .header("content-type","application/json")
+        .body(Body::from(comp_body)).unwrap();
+    let comp_resp = app.clone().oneshot(comp_req).await.unwrap();
+    assert_eq!(comp_resp.status(), StatusCode::OK);
+    let new_status: String = sqlx::query_scalar("SELECT status FROM artifacts WHERE digest=$1").bind(&digest).fetch_one(&pool).await.unwrap();
+    assert_eq!(new_status, "stored");
+    // HEAD now OK
+    let head2 = Request::builder().method("HEAD").uri(format!("/artifacts/{}", digest)).body(Body::empty()).unwrap();
+    let head2_resp = app.clone().oneshot(head2).await.unwrap();
+    assert_eq!(head2_resp.status(), StatusCode::OK);
 }
