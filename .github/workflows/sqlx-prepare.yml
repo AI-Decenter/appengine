@@ -1,0 +1,49 @@
+name: SQLx Prepare Validation
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  sqlx-prepare:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_DB: aether_dev
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      RUST_VERSION: 1.90.0
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/aether_dev
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: sqlx-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+      - name: Install sqlx-cli
+        run: cargo install sqlx-cli --no-default-features --features native-tls,postgres
+      - name: Run migrations
+        working-directory: crates/control-plane
+        run: sqlx migrate run
+      - name: Prepare offline data
+        run: cargo sqlx prepare --workspace -- --all-targets
+      - name: Verify sqlx-data.json committed
+        run: git diff --name-only --exit-code sqlx-data.json || { echo 'sqlx-data.json drift detected'; exit 1; }
+      - name: Summary
+        run: echo "sqlx-data.json validated" >> $GITHUB_STEP_SUMMARY

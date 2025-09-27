@@ -1,0 +1,66 @@
+name: Main Coverage & Codecov
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  checks: write
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    env:
+      RUST_VERSION: 1.90.0
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: llvm-tools-preview
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: maincov-${{ hashFiles('Cargo.lock') }}
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      - name: Generate Coverage (LCOV + summary)
+        run: |
+          cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info
+          cargo llvm-cov report --json --output-path coverage-summary.json
+          echo "Generated coverage artifacts"
+      - name: Upload LCOV artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lcov-main
+          path: lcov.info
+      - name: Upload summary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-summary
+          path: coverage-summary.json
+      - name: Derive simple percentage for badge
+        id: cov
+        run: |
+          PCT=$(jq '.packages | map(.line_rate) | add / length * 100' coverage-summary.json | awk '{printf("%0.2f", $1)}')
+          echo "pct=$PCT" >> $GITHUB_OUTPUT
+      - name: Create/Update coverage badge
+        uses: schneegans/dynamic-badges-action@v1.7.0
+        with:
+          auth: ${{ secrets.GITHUB_TOKEN }}
+          gistID: ${{ secrets.COVERAGE_GIST_ID }}
+          filename: aether-coverage.json
+          label: coverage
+          message: ${{ steps.cov.outputs.pct }}%
+          color: $( [ $(echo "${{ steps.cov.outputs.pct }} > 85" | bc) -eq 1 ] && echo "brightgreen" || echo "yellow" )
+      - name: Print coverage percent
+        run: echo "Coverage: ${{ steps.cov.outputs.pct }}%"
