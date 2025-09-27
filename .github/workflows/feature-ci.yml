@@ -130,8 +130,10 @@ jobs:
           key: test-macos-${{ hashFiles('Cargo.lock') }}
       - name: Build (debug)
         run: cargo build --workspace --all-targets
-      - name: Run tests (full, no DB)
-        run: cargo test --workspace --all-features -- --nocapture
+      - name: Run tests (CLI + operator only)
+        run: |
+          cargo test -p aether-cli -p operator --all-features -- --nocapture
+          echo "Skipped control-plane DB tests on macOS (Linux job covers them)." >> $GITHUB_STEP_SUMMARY
       - name: Build release aether-cli
         run: cargo build -p aether-cli --release
       - name: Upload aether-cli binary artifact
