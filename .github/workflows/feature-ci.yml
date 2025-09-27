@@ -146,9 +146,13 @@ jobs:
           done
       - name: Initialize database
         run: |
-          psql -d postgres -c "DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='postgres') THEN CREATE ROLE postgres LOGIN PASSWORD 'postgres'; END IF; END $$;" || true
-          psql -d postgres -c "ALTER ROLE postgres WITH PASSWORD 'postgres';" || true
-          psql -d postgres -c "CREATE DATABASE aether_dev OWNER postgres;" || true
+          # Ensure superuser role 'postgres' exists with password
+          createuser -s postgres 2>/dev/null || true
+          psql -d postgres -c "ALTER ROLE postgres WITH SUPERUSER LOGIN PASSWORD 'postgres';" || true
+          # Create database if missing
+          if ! psql -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='aether_dev'" | grep -q 1; then
+            psql -d postgres -c "CREATE DATABASE aether_dev OWNER postgres;"
+          fi
       - name: Run migrations
         working-directory: crates/control-plane
         run: |
