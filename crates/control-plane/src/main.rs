@@ -19,7 +19,10 @@ async fn main() -> anyhow::Result<()> {
     let db_pool = init_db(&database_url).await.expect("database must be available");
     let state = AppState { db: db_pool };
     let rate_limit_enabled = std::env::var("AETHER_RATE_LIMIT").unwrap_or_default() == "1";
-    let auth_token = std::env::var("AETHER_API_TOKEN").ok();
+    // Support multiple tokens via CSV env AETHER_API_TOKENS; keep backward compat with single AETHER_API_TOKEN
+    let auth_tokens: Vec<String> = if let Ok(list) = std::env::var("AETHER_API_TOKENS") {
+        list.split(',').filter_map(|s| { let t = s.trim(); if t.is_empty() { None } else { Some(t.to_string()) } }).collect()
+    } else if let Ok(single) = std::env::var("AETHER_API_TOKEN") { vec![single] } else { Vec::new() };
     let rate_state: Arc<Mutex<HashMap<IpAddr,(u32,std::time::Instant)>>> = Arc::new(Mutex::new(HashMap::new()));
     let app = build_router(state.clone());
     async fn track_metrics(mut req: Request<Body>, next: Next) -> Response {
@@ -39,11 +42,11 @@ async fn main() -> anyhow::Result<()> {
         resp
     }
     // Auth + Rate limit + Pool gauges
-    let auth_token_clone = auth_token.clone();
+    let auth_tokens_clone = auth_tokens.clone();
     let state_clone = state.clone();
     let rate_state_clone = rate_state.clone();
     let auth_and_limit = move |req: Request<Body>, next: Next| {
-        let auth_token = auth_token_clone.clone();
+    let auth_tokens = auth_tokens_clone.clone();
         let state_for_pool = state_clone.clone();
         let rate_state = rate_state_clone.clone();
         async move {
@@ -59,11 +62,10 @@ async fn main() -> anyhow::Result<()> {
                     entry.0 += 1;
                 }
             }
-            if !exempt {
-                if let Some(expected) = auth_token {
-                    let ok = req.headers().get("authorization").and_then(|v| v.to_str().ok()).map(|v| v == format!("Bearer {expected}")).unwrap_or(false);
-                    if !ok { return Response::builder().status(401).body(Body::from("unauthorized")).unwrap(); }
-                }
+            if !exempt && !auth_tokens.is_empty() {
+                let provided = req.headers().get("authorization").and_then(|v| v.to_str().ok()).unwrap_or("");
+                let valid = auth_tokens.iter().any(|tok| provided == format!("Bearer {tok}"));
+                if !valid { return Response::builder().status(401).body(Body::from("unauthorized")).unwrap(); }
             }
             let pool = &state_for_pool.db;
             let size = pool.size() as i64;

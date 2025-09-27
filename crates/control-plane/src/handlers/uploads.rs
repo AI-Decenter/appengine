@@ -1,38 +1,89 @@
 use axum::{extract::State, Json};
-use axum::http::StatusCode;
+use axum::http::{StatusCode, HeaderMap};
 use axum::response::IntoResponse;
 use serde::Deserialize;
 use uuid::Uuid;
-use crate::AppState;
-use std::fs;use std::path::PathBuf;use tracing::{info,error};
+use crate::{AppState, error::ApiError};
+use std::{fs, path::PathBuf, io::Write};
+use tracing::{info,error,warn};
+use sha2::{Sha256, Digest};
+use sqlx::Row;
 
 #[derive(Deserialize)]
 pub struct UploadForm { pub app_name: String }
 
-pub async fn upload_artifact(State(_state): State<AppState>, mut multipart: axum::extract::Multipart) -> impl IntoResponse {
+pub async fn upload_artifact(State(state): State<AppState>, headers: HeaderMap, mut multipart: axum::extract::Multipart) -> impl IntoResponse {
+    // Validate headers
+    let Some(digest_header) = headers.get("x-aether-artifact-digest").and_then(|v| v.to_str().ok()) else {
+        return ApiError::new(StatusCode::BAD_REQUEST, "missing_digest", "X-Aether-Artifact-Digest required").into_response();
+    };
+    if digest_header.len() != 64 || !digest_header.chars().all(|c| c.is_ascii_hexdigit()) {
+        return ApiError::new(StatusCode::BAD_REQUEST, "invalid_digest", "digest must be 64 hex chars").into_response();
+    }
+    let signature = headers.get("x-aether-signature").and_then(|v| v.to_str().ok()).map(|s| s.to_string());
+
     let mut app_name: Option<String> = None;
-    let mut file_bytes: Option<Vec<u8>> = None;
+    // We'll stream artifact into temp file and recompute digest
+    let dir = std::env::var("ARTIFACT_STORE_DIR").unwrap_or_else(|_| "./data/artifacts".into());
+    if let Err(e) = fs::create_dir_all(&dir) { error!(?e, "create_store_dir_failed"); return ApiError::internal("store dir").into_response(); }
+    let tmp_id = Uuid::new_v4();
+    let tmp_path = PathBuf::from(&dir).join(format!("upload-{tmp_id}.part"));
+    let mut hasher = Sha256::new();
+    let mut file_written = false;
+    let mut f = match fs::File::create(&tmp_path) { Ok(f)=>f, Err(e)=> { error!(?e, "create_tmp_failed"); return ApiError::internal("tmp create").into_response(); } };
+
     while let Ok(Some(field)) = multipart.next_field().await {
         let name = field.name().map(|s| s.to_string());
         match name.as_deref() {
-            Some("app_name") => {
-                if let Ok(val) = field.text().await { app_name = Some(val); }
-            }
+            Some("app_name") => { if let Ok(val) = field.text().await { app_name = Some(val); } }
             Some("artifact") => {
-                if let Ok(bytes) = field.bytes().await { file_bytes = Some(bytes.to_vec()); }
+                // stream
+                let mut stream = field;
+                while let Ok(Some(chunk)) = stream.chunk().await {
+                    hasher.update(&chunk);
+                    if let Err(e) = f.write_all(&chunk) { error!(?e, "write_chunk_failed"); return ApiError::internal("write").into_response(); }
+                }
+                file_written = true;
             }
             _ => {}
         }
     }
-    let Some(app) = app_name else { return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error":"missing app_name"}))); };
-    let Some(bytes) = file_bytes else { return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error":"missing artifact file"}))); };
-    // store file
-    let dir = std::env::var("ARTIFACT_STORE_DIR").unwrap_or_else(|_| "./data/artifacts".into());
-    if let Err(e)=fs::create_dir_all(&dir) { error!(?e, "create_store_dir_failed"); return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error":"store dir"}))); }
+    let Some(app) = app_name else { let _ = fs::remove_file(&tmp_path); return ApiError::bad_request("missing app_name").into_response(); };
+    if !file_written { let _ = fs::remove_file(&tmp_path); return ApiError::bad_request("missing artifact file").into_response(); }
+    let computed = format!("{:x}", hasher.finalize());
+    if computed != digest_header {
+        let _ = fs::remove_file(&tmp_path);
+        return ApiError::new(StatusCode::BAD_REQUEST, "digest_mismatch", "artifact digest mismatch").into_response();
+    }
+
+    // Idempotency: if digest exists in DB, reuse path / do not rewrite
+    let mut conn = match state.db.acquire().await { Ok(c)=>c, Err(e)=> { error!(?e, "acquire_conn"); return ApiError::internal("db").into_response(); } };
+    if let Ok(existing) = sqlx::query_scalar::<_, String>("SELECT id::text FROM artifacts WHERE digest = $1").bind(&computed).fetch_one(&mut *conn).await {
+        info!(app=%app, digest=%computed, artifact_id=%existing, "artifact_duplicate_digest");
+        let url = format!("file://{dir}/{}.tar.gz", existing);
+        let _ = fs::remove_file(&tmp_path);
+        return (StatusCode::OK, Json(serde_json::json!({"artifact_url": url, "digest": computed, "duplicate": true}))).into_response();
+    }
+
+    // Promote temp -> final
     let file_id = Uuid::new_v4();
-    let path = PathBuf::from(dir).join(format!("{file_id}.tar.gz"));
-    if let Err(e)=fs::write(&path, &bytes) { error!(?e, "write_artifact_failed"); return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error":"write failed"}))); }
-    info!(app=%app, artifact_path=%path.display(), size=bytes.len(), "artifact_uploaded");
-    let url = format!("file://{}", path.display());
-    (StatusCode::OK, Json(serde_json::json!({"artifact_url": url })))
+    let final_path = PathBuf::from(&dir).join(format!("{file_id}.tar.gz"));
+    if let Err(e)=fs::rename(&tmp_path, &final_path) { warn!(?e, "rename_failed_fallback_copy"); if let Err(e2)=fs::copy(&tmp_path, &final_path) { error!(?e2, "copy_failed"); return ApiError::internal("persist").into_response(); } let _ = fs::remove_file(&tmp_path); }
+    let meta = fs::metadata(&final_path).ok();
+    let size = meta.map(|m| m.len() as i64).unwrap_or(0);
+    let url = format!("file://{}", final_path.display());
+    // Insert artifact row
+    let rec = sqlx::query("INSERT INTO artifacts (app_id, digest, size_bytes, signature, sbom_url, manifest_url, verified) VALUES (NULL,$1,$2,$3,NULL,NULL,FALSE) RETURNING id")
+        .bind(&computed)
+        .bind(size)
+        .bind(signature.as_ref())
+        .fetch_one(&mut *conn).await;
+    match rec {
+        Ok(row)=> {
+            let id: Uuid = row.get::<Uuid, _>(0);
+            info!(app=%app, digest=%computed, artifact_id=%id, size_bytes=size, "artifact_uploaded");
+            (StatusCode::OK, Json(serde_json::json!({"artifact_url": url, "digest": computed, "duplicate": false }))).into_response()
+        }
+        Err(e)=> { error!(?e, "db_insert_artifact_failed"); ApiError::internal("db insert").into_response() }
+    }
 }
