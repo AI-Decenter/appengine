@@ -7,7 +7,7 @@ pub mod telemetry;
 
 use axum::{Router, routing::{get, post}};
 use sqlx::{Pool, Postgres};
-use handlers::{health::health, apps::{list_apps, app_logs, create_app, app_deployments, add_public_key}, deployments::{create_deployment, list_deployments}, readiness::readiness, uploads::{upload_artifact, list_artifacts, head_artifact}};
+use handlers::{health::health, apps::{list_apps, app_logs, create_app, app_deployments, add_public_key}, deployments::{create_deployment, list_deployments}, readiness::readiness, uploads::{upload_artifact, list_artifacts, head_artifact, presign_artifact, complete_artifact}};
 use utoipa::OpenApi;
 use crate::telemetry::metrics_handler;
 use axum::response::Html;
@@ -28,6 +28,8 @@ pub struct AppState { pub db: Pool<Postgres> }
     handlers::deployments::list_deployments,
     handlers::uploads::upload_artifact,
     handlers::uploads::list_artifacts,
+    handlers::uploads::presign_artifact,
+    handlers::uploads::complete_artifact,
     handlers::apps::add_public_key,
     ),
     components(schemas(error::ApiErrorBody)),
@@ -70,6 +72,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/metrics", get(metrics_handler))
     .route("/deployments", post(create_deployment).get(list_deployments))
     .route("/artifacts", post(upload_artifact).get(list_artifacts))
+    .route("/artifacts/presign", post(presign_artifact))
+    .route("/artifacts/complete", post(complete_artifact))
     .route("/artifacts/:digest", axum::routing::head(head_artifact))
         .route("/apps", post(create_app))
         .route("/apps", get(list_apps))

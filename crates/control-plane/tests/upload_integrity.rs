@@ -163,6 +163,50 @@ async fn upload_with_verification_true() {
 }
 
 #[tokio::test]
+async fn presign_complete_idempotent() {
+    let Some(pool) = maybe_pool().await else { eprintln!("skipping (no db)"); return; };
+    ensure_schema(&pool).await;
+    sqlx::query("DELETE FROM artifacts").execute(&pool).await.ok();
+    sqlx::query("DELETE FROM applications").execute(&pool).await.ok();
+    sqlx::query("INSERT INTO applications (name) VALUES ($1)").bind("presignapp").execute(&pool).await.unwrap();
+    let app = build_router(AppState { db: pool.clone() });
+    let digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string();
+    // Presign
+    let body = serde_json::json!({"app_name":"presignapp","digest":digest}).to_string();
+    let req = Request::builder().method("POST").uri("/artifacts/presign")
+        .header("content-type","application/json")
+        .body(Body::from(body)).unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let presign_body = axum::body::to_bytes(resp.into_body(), 2048).await.unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&presign_body).unwrap();
+    assert_eq!(v["method"], "PUT");
+    let storage_key = v["storage_key"].as_str().unwrap().to_string();
+    assert!(storage_key.contains(&digest));
+    // Complete first time
+    let complete_req = serde_json::json!({"app_name":"presignapp","digest":digest,"size_bytes":1234,"signature":null}).to_string();
+    let comp = Request::builder().method("POST").uri("/artifacts/complete")
+        .header("content-type","application/json")
+        .body(Body::from(complete_req)).unwrap();
+    let comp_resp = app.clone().oneshot(comp).await.unwrap();
+    assert_eq!(comp_resp.status(), StatusCode::OK);
+    let comp_body = axum::body::to_bytes(comp_resp.into_body(), 2048).await.unwrap();
+    let cv: serde_json::Value = serde_json::from_slice(&comp_body).unwrap();
+    assert_eq!(cv["duplicate"], false);
+    assert_eq!(cv["status"], "stored");
+    // Complete second time (idempotent)
+    let comp2_req = serde_json::json!({"app_name":"presignapp","digest":digest,"size_bytes":1234,"signature":null}).to_string();
+    let comp2 = Request::builder().method("POST").uri("/artifacts/complete")
+        .header("content-type","application/json")
+        .body(Body::from(comp2_req)).unwrap();
+    let comp2_resp = app.clone().oneshot(comp2).await.unwrap();
+    assert_eq!(comp2_resp.status(), StatusCode::OK);
+    let comp2_body = axum::body::to_bytes(comp2_resp.into_body(), 2048).await.unwrap();
+    let cv2: serde_json::Value = serde_json::from_slice(&comp2_body).unwrap();
+    assert_eq!(cv2["duplicate"], true);
+}
+
+#[tokio::test]
 async fn upload_unauthorized() {
     // Preserve old value
     let prev = std::env::var("AETHER_API_TOKENS").ok();

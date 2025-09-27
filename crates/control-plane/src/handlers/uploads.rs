@@ -35,6 +35,130 @@ static UPLOAD_SEMAPHORE: once_cell::sync::Lazy<tokio::sync::Semaphore> = once_ce
 #[derive(Deserialize)]
 pub struct UploadForm { pub app_name: String }
 
+#[derive(serde::Deserialize, serde::Serialize, utoipa::ToSchema)]
+pub struct PresignRequest { pub app_name: String, pub digest: String }
+
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub struct PresignResponse { pub upload_url: String, pub storage_key: String, pub method: String, pub headers: std::collections::HashMap<String,String> }
+
+#[utoipa::path(post, path="/artifacts/presign", request_body=PresignRequest, responses((status=200, body=PresignResponse),(status=400, body=crate::error::ApiErrorBody)) , tag="aether")]
+pub async fn presign_artifact(State(state): State<AppState>, Json(req): Json<PresignRequest>) -> impl IntoResponse {
+    if req.app_name.trim().is_empty() { return ApiError::bad_request("app_name required").into_response(); }
+    if req.digest.len()!=64 || !req.digest.chars().all(|c| c.is_ascii_hexdigit()) { return ApiError::new(StatusCode::BAD_REQUEST, "invalid_digest", "digest must be 64 hex").into_response(); }
+    // idempotent: if artifact already exists return dummy presign (already stored)
+    if let Ok(Some(_existing)) = sqlx::query_scalar::<_, String>("SELECT id::text FROM artifacts WHERE digest=$1")
+        .bind(&req.digest).fetch_optional(&state.db).await {
+        let headers = std::collections::HashMap::new();
+        return (StatusCode::OK, Json(PresignResponse { upload_url: String::new(), storage_key: String::new(), method: "NONE".into(), headers })).into_response();
+    }
+    let bucket = std::env::var("AETHER_ARTIFACT_BUCKET").unwrap_or_else(|_| "artifacts".into());
+    let key = format!("artifacts/{}/{}/app.tar.gz", req.app_name, req.digest);
+    // For now, mock presign (future: real S3/MinIO presign). Accept simple base URL env.
+    let base_url = std::env::var("AETHER_S3_BASE_URL").unwrap_or_else(|_| "http://minio.local:9000".into());
+    let upload_url = format!("{}/{}/{}", base_url.trim_end_matches('/'), bucket, key);
+    let mut headers = std::collections::HashMap::new();
+    headers.insert("x-amz-acl".into(), "private".into());
+    (StatusCode::OK, Json(PresignResponse { upload_url, storage_key: key, method: "PUT".into(), headers })).into_response()
+}
+
+#[derive(serde::Deserialize, serde::Serialize, utoipa::ToSchema)]
+pub struct CompleteRequest { pub app_name: String, pub digest: String, pub size_bytes: i64, pub signature: Option<String> }
+
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub struct CompleteResponse { pub artifact_id: String, pub digest: String, pub duplicate: bool, pub verified: bool, pub storage_key: String, pub status: String }
+
+#[utoipa::path(post, path="/artifacts/complete", request_body=CompleteRequest, responses((status=200, body=CompleteResponse),(status=400, body=crate::error::ApiErrorBody)), tag="aether")]
+pub async fn complete_artifact(State(state): State<AppState>, Json(req): Json<CompleteRequest>) -> impl IntoResponse {
+    // Basic validation
+    if req.app_name.trim().is_empty() { return ApiError::bad_request("app_name required").into_response(); }
+    if req.digest.len()!=64 || !req.digest.chars().all(|c| c.is_ascii_hexdigit()) {
+        return ApiError::new(StatusCode::BAD_REQUEST, "invalid_digest", "digest must be 64 hex").into_response();
+    }
+    if req.size_bytes < 0 { return ApiError::bad_request("size_bytes must be >= 0").into_response(); }
+
+    let signature = req.signature.clone();
+    let storage_key = format!("artifacts/{}/{}/app.tar.gz", req.app_name, req.digest);
+
+    // DB connection
+    let mut conn = match state.db.acquire().await { Ok(c)=>c, Err(e)=> { error!(?e, "acquire_conn"); return ApiError::internal("db").into_response(); } };
+
+    // Resolve application id (optional link)
+    let app_id: Option<uuid::Uuid> = sqlx::query_scalar("SELECT id FROM applications WHERE name=$1")
+        .bind(&req.app_name)
+        .fetch_optional(&mut *conn).await.ok().flatten();
+
+    // Idempotent: if already stored return duplicate flag
+    if let Ok(Some((id, verified, existing_key, status))) = sqlx::query_as::<_, (Uuid,bool,Option<String>,String)>(
+        "SELECT id, verified, storage_key, status FROM artifacts WHERE digest=$1")
+        .bind(&req.digest)
+        .fetch_optional(&mut *conn).await {
+        return (StatusCode::OK, Json(CompleteResponse {
+            artifact_id: id.to_string(),
+            digest: req.digest,
+            duplicate: true,
+            verified,
+            storage_key: existing_key.unwrap_or_default(),
+            status,
+        })).into_response();
+    }
+
+    // Signature verification (optional)
+    let mut verified = false;
+    if let Some(sig_hex) = signature.as_ref() {
+        if sig_hex.len()==128 && sig_hex.chars().all(|c| c.is_ascii_hexdigit()) {
+            if let Ok(Some(app_uuid)) = sqlx::query_scalar::<_, uuid::Uuid>(
+                "SELECT id FROM applications WHERE name=$1")
+                .bind(&req.app_name)
+                .fetch_optional(&mut *conn).await {
+                if let Ok(rows) = sqlx::query_scalar::<_, String>(
+                    "SELECT public_key_hex FROM public_keys WHERE app_id=$1 AND active")
+                    .bind(app_uuid)
+                    .fetch_all(&mut *conn).await {
+                    for pk_hex in rows {
+                        if let (Ok(sig_bytes), Ok(pk_bytes)) = (hex::decode(sig_hex), hex::decode(&pk_hex)) {
+                            if pk_bytes.len()==32 && sig_bytes.len()==64 {
+                                use ed25519_dalek::{Verifier, Signature, VerifyingKey};
+                                if let (Ok(vk), Ok(sig)) = (
+                                    VerifyingKey::from_bytes(pk_bytes.as_slice().try_into().unwrap()),
+                                    Signature::from_slice(&sig_bytes)
+                                ) {
+                                    if vk.verify(req.digest.as_bytes(), &sig).is_ok() { verified = true; break; }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Insert metadata (status: stored)
+    let inserted = sqlx::query("INSERT INTO artifacts (app_id, digest, size_bytes, signature, sbom_url, manifest_url, verified, storage_key, status) VALUES ($1,$2,$3,$4,NULL,NULL,$5,$6,'stored') RETURNING id")
+        .bind(app_id)
+        .bind(&req.digest)
+        .bind(req.size_bytes)
+        .bind(signature.as_ref())
+        .bind(verified) // $5 verified
+        .bind(&storage_key) // $6 storage_key
+        .fetch_one(&mut *conn).await;
+
+    match inserted {
+        Ok(row) => {
+            let id: Uuid = row.get(0);
+            ARTIFACTS_TOTAL.inc();
+            (StatusCode::OK, Json(CompleteResponse {
+                artifact_id: id.to_string(),
+                digest: req.digest,
+                duplicate: false,
+                verified,
+                storage_key,
+                status: "stored".into(),
+            })).into_response()
+        }
+        Err(e) => { error!(?e, "insert_artifact_failed"); ApiError::internal("db insert").into_response() }
+    }
+}
+
 #[utoipa::path(
     post,
     path = "/artifacts",

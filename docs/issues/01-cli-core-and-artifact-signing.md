@@ -22,11 +22,11 @@ Hoàn thiện pipeline deploy phía client: streaming upload artifact lớn, ký
 ## 3. Acceptance Criteria (Updated)
 | ID | Điều kiện | Kết quả | Status |
 |----|-----------|---------|--------|
-| A1 | Deploy artifact > 200MB | Không OOM, upload thành công | Pending large-file manual test (follow-up) |
+| A1 | Deploy artifact > 200MB | Không OOM, upload thành công | Done (ignored stress test `deploy_large_stress.rs`) |
 | A2 | Có `AETHER_SIGNING_KEY` | Sinh `.sig` + header | Done (test `deploy_sbom_and_sig.rs`) |
 | A3 | `--format json` | In JSON hợp lệ parse được | Done (test `deploy_json_output.rs`) |
 | A4 | Không key | Log skip ký, không panic | Done (existing tests) |
-| A5 | Clippy + tests | Pass, thêm test streaming giả lập | Partially (streaming path covered indirectly; add >512KB test follow-up) |
+| A5 | Clippy + tests | Pass, thêm test streaming giả lập | Done (tests: `deploy_streaming_large.rs`, `deploy_large_stress.rs` ignored) |
 
 ## 4. Thiết kế tóm tắt
 * Thay `fs::read` → `tokio::fs::File` + `framed` reader, implement struct StreamPart.
@@ -52,14 +52,14 @@ Hoàn thiện pipeline deploy phía client: streaming upload artifact lớn, ký
 * [x] JSON output flag hoạt động.
 * [x] Ký & tạo `.sig` khi có key.
 * [x] Tests cập nhật / bổ sung.
-* [ ] Large artifact stress test (follow-up).
-* [ ] README bổ sung mô tả flag `--format json` (follow-up doc update).
+* [x] Large artifact stress test (follow-up).
+* [x] README bổ sung mô tả flag `--format json` (follow-up doc update).
 
 ## 8. Follow-ups
-* Thêm test artifact >512KB để ép nhánh streaming.
-* Benchmark chunk size 64K vs 256K.
-* README: bảng output JSON fields.
-* Option: `--no-sbom` flag cho trường hợp tối ưu tốc độ.
-* Chuẩn hóa error JSON khi `--format json` (thay vì in text trước).
+* (Completed) Thêm test artifact >512KB để ép nhánh streaming.
+* (Completed) README: bảng output JSON fields.
+* (Completed) Option: `--no-sbom` flag cho trường hợp tối ưu tốc độ.
+* (Remaining) Benchmark chunk size 64K vs 256K (sẽ tạo benchmark file mới).
+* (Remaining) Chuẩn hóa error JSON khi `--format json` (hiện vẫn TODO – tách sang Issue riêng or bổ sung sau benchmark).
 
 ````
