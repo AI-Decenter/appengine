@@ -3,7 +3,7 @@ use axum::http::{StatusCode, HeaderMap};
 use axum::response::IntoResponse;
 use serde::Deserialize;
 use uuid::Uuid;
-use crate::{AppState, error::ApiError, telemetry::REGISTRY, models::Artifact};
+use crate::{AppState, error::ApiError, telemetry::REGISTRY, models::Artifact, storage::{get_storage}};
 use utoipa::ToSchema;
 use std::{fs, path::PathBuf, io::Write, time::Instant};
 use tracing::{info,error,warn, span, Level};
@@ -27,6 +27,38 @@ static ARTIFACTS_TOTAL: once_cell::sync::Lazy<prometheus::IntGauge> = once_cell:
     let g = prometheus::IntGauge::new("artifacts_total", "Total number of stored artifacts").unwrap();
     REGISTRY.register(Box::new(g.clone())).ok(); g
 });
+static PRESIGN_REQUESTS: once_cell::sync::Lazy<prometheus::IntCounter> = once_cell::sync::Lazy::new(|| {
+    let c = prometheus::IntCounter::new("artifact_presign_requests_total", "Total presign requests").unwrap();
+    REGISTRY.register(Box::new(c.clone())).ok(); c
+});
+static COMPLETE_DURATION: once_cell::sync::Lazy<prometheus::Histogram> = once_cell::sync::Lazy::new(|| {
+    let h = prometheus::Histogram::with_opts(prometheus::HistogramOpts::new("artifact_complete_duration_seconds", "Duration of complete endpoint processing")).unwrap();
+    REGISTRY.register(Box::new(h.clone())).ok(); h
+});
+static PRESIGN_FAILURES: once_cell::sync::Lazy<prometheus::IntCounter> = once_cell::sync::Lazy::new(|| {
+    let c = prometheus::IntCounter::new("artifact_presign_failures_total", "Total presign failures").unwrap();
+    REGISTRY.register(Box::new(c.clone())).ok(); c
+});
+static COMPLETE_FAILURES: once_cell::sync::Lazy<prometheus::IntCounter> = once_cell::sync::Lazy::new(|| {
+    let c = prometheus::IntCounter::new("artifact_complete_failures_total", "Total complete failures").unwrap();
+    REGISTRY.register(Box::new(c.clone())).ok(); c
+});
+static SIZE_EXCEEDED_FAILURES: once_cell::sync::Lazy<prometheus::IntCounter> = once_cell::sync::Lazy::new(|| {
+    let c = prometheus::IntCounter::new("artifact_size_exceeded_total", "Total artifacts rejected for exceeding max size").unwrap();
+    REGISTRY.register(Box::new(c.clone())).ok(); c
+});
+static PENDING_GC_RUNS: once_cell::sync::Lazy<prometheus::IntCounter> = once_cell::sync::Lazy::new(|| {
+    let c = prometheus::IntCounter::new("artifact_pending_gc_runs_total", "Pending artifact GC runs").unwrap();
+    REGISTRY.register(Box::new(c.clone())).ok(); c
+});
+static PENDING_GC_DELETED: once_cell::sync::Lazy<prometheus::IntCounter> = once_cell::sync::Lazy::new(|| {
+    let c = prometheus::IntCounter::new("artifact_pending_gc_deleted_total", "Pending artifacts deleted by GC").unwrap();
+    REGISTRY.register(Box::new(c.clone())).ok(); c
+});
+static DIGEST_MISMATCHES: once_cell::sync::Lazy<prometheus::IntCounter> = once_cell::sync::Lazy::new(|| {
+    let c = prometheus::IntCounter::new("artifact_digest_mismatch_total", "Total remote digest mismatches (metadata or hash)").unwrap();
+    REGISTRY.register(Box::new(c.clone())).ok(); c
+});
 static UPLOAD_SEMAPHORE: once_cell::sync::Lazy<tokio::sync::Semaphore> = once_cell::sync::Lazy::new(|| {
     let max = std::env::var("AETHER_MAX_CONCURRENT_UPLOADS").ok().and_then(|v| v.parse::<usize>().ok()).filter(|v| *v>0).unwrap_or(32);
     tokio::sync::Semaphore::new(max)
@@ -43,6 +75,7 @@ pub struct PresignResponse { pub upload_url: String, pub storage_key: String, pu
 
 #[utoipa::path(post, path="/artifacts/presign", request_body=PresignRequest, responses((status=200, body=PresignResponse),(status=400, body=crate::error::ApiErrorBody)) , tag="aether")]
 pub async fn presign_artifact(State(state): State<AppState>, Json(req): Json<PresignRequest>) -> impl IntoResponse {
+    PRESIGN_REQUESTS.inc();
     if req.app_name.trim().is_empty() { return ApiError::bad_request("app_name required").into_response(); }
     if req.digest.len()!=64 || !req.digest.chars().all(|c| c.is_ascii_hexdigit()) { return ApiError::new(StatusCode::BAD_REQUEST, "invalid_digest", "digest must be 64 hex").into_response(); }
     // Check existing artifact row
@@ -54,25 +87,29 @@ pub async fn presign_artifact(State(state): State<AppState>, Json(req): Json<Pre
             let headers = std::collections::HashMap::new();
             return (StatusCode::OK, Json(PresignResponse { upload_url: String::new(), storage_key: sk.unwrap_or_default(), method: "NONE".into(), headers })).into_response();
         } else {
-            let bucket = std::env::var("AETHER_ARTIFACT_BUCKET").unwrap_or_else(|_| "artifacts".into());
             let key = sk.unwrap_or_else(|| format!("artifacts/{}/{}/app.tar.gz", req.app_name, req.digest));
-            let base_url = std::env::var("AETHER_S3_BASE_URL").unwrap_or_else(|_| "http://minio.local:9000".into());
-            let upload_url = format!("{}/{}/{}", base_url.trim_end_matches('/'), bucket, key);
-            let mut headers = std::collections::HashMap::new(); headers.insert("x-amz-acl".into(), "private".into());
-            return (StatusCode::OK, Json(PresignResponse { upload_url, storage_key: key, method: "PUT".into(), headers })).into_response();
+            // Generate presigned URL via storage backend
+            let storage = get_storage().await;
+            let expire_secs = std::env::var("AETHER_PRESIGN_EXPIRE_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(900);
+            match storage.backend().presign_artifact_put(&key, &req.digest, std::time::Duration::from_secs(expire_secs)).await {
+                Ok(p) => return (StatusCode::OK, Json(PresignResponse { upload_url: p.url, storage_key: p.storage_key, method: p.method, headers: p.headers })).into_response(),
+                Err(e) => { error!(?e, "presign_backend_error"); PRESIGN_FAILURES.inc(); return ApiError::internal("presign backend").into_response(); }
+            }
         }
     }
     // Create new pending record
-    let bucket = std::env::var("AETHER_ARTIFACT_BUCKET").unwrap_or_else(|_| "artifacts".into());
     let key = format!("artifacts/{}/{}/app.tar.gz", req.app_name, req.digest);
-    let base_url = std::env::var("AETHER_S3_BASE_URL").unwrap_or_else(|_| "http://minio.local:9000".into());
-    let upload_url = format!("{}/{}/{}", base_url.trim_end_matches('/'), bucket, key);
-    let mut headers = std::collections::HashMap::new(); headers.insert("x-amz-acl".into(), "private".into());
+    let storage = get_storage().await;
+    let expire_secs = std::env::var("AETHER_PRESIGN_EXPIRE_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(900);
+    let presigned = match storage.backend().presign_artifact_put(&key, &req.digest, std::time::Duration::from_secs(expire_secs)).await {
+        Ok(p)=> p,
+        Err(e)=> { error!(?e, "presign_backend_error"); PRESIGN_FAILURES.inc(); return ApiError::internal("presign backend").into_response(); }
+    };
     let _ = sqlx::query("INSERT INTO artifacts (app_id, digest, size_bytes, signature, sbom_url, manifest_url, verified, storage_key, status) VALUES (NULL,$1,0,NULL,NULL,NULL,FALSE,$2,'pending') ON CONFLICT (digest) DO NOTHING")
         .bind(&req.digest)
-        .bind(&key)
+        .bind(&presigned.storage_key)
         .execute(&state.db).await;
-    (StatusCode::OK, Json(PresignResponse { upload_url, storage_key: key, method: "PUT".into(), headers })).into_response()
+    (StatusCode::OK, Json(PresignResponse { upload_url: presigned.url, storage_key: presigned.storage_key, method: presigned.method, headers: presigned.headers })).into_response()
 }
 
 #[derive(serde::Deserialize, serde::Serialize, utoipa::ToSchema)]
@@ -83,12 +120,14 @@ pub struct CompleteResponse { pub artifact_id: String, pub digest: String, pub d
 
 #[utoipa::path(post, path="/artifacts/complete", request_body=CompleteRequest, responses((status=200, body=CompleteResponse),(status=400, body=crate::error::ApiErrorBody)), tag="aether")]
 pub async fn complete_artifact(State(state): State<AppState>, Json(req): Json<CompleteRequest>) -> impl IntoResponse {
+    let start = std::time::Instant::now();
     // Basic validation
     if req.app_name.trim().is_empty() { return ApiError::bad_request("app_name required").into_response(); }
     if req.digest.len()!=64 || !req.digest.chars().all(|c| c.is_ascii_hexdigit()) {
         return ApiError::new(StatusCode::BAD_REQUEST, "invalid_digest", "digest must be 64 hex").into_response();
     }
     if req.size_bytes < 0 { return ApiError::bad_request("size_bytes must be >= 0").into_response(); }
+    if let Ok(max_str) = std::env::var("AETHER_MAX_ARTIFACT_SIZE_BYTES") { if let Ok(max) = max_str.parse::<i64>() { if max>0 && req.size_bytes > max { SIZE_EXCEEDED_FAILURES.inc(); return ApiError::new(StatusCode::BAD_REQUEST, "size_exceeded", format!("reported size {} exceeds max {}", req.size_bytes, max)).into_response(); } } }
 
     let signature = req.signature.clone();
     let key = format!("artifacts/{}/{}/app.tar.gz", req.app_name, req.digest);
@@ -105,6 +144,10 @@ pub async fn complete_artifact(State(state): State<AppState>, Json(req): Json<Co
     let existing = sqlx::query_as::<_, (Uuid,bool,Option<String>,String)>("SELECT id, verified, storage_key, status FROM artifacts WHERE digest=$1")
         .bind(&req.digest)
         .fetch_optional(&mut *conn).await.ok().flatten();
+    let require_presign = std::env::var("AETHER_REQUIRE_PRESIGN").ok().map(|v| v=="1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
+    if require_presign && existing.is_none() {
+        return ApiError::new(StatusCode::BAD_REQUEST, "presign_required", "presign step required before completion").into_response();
+    }
     if let Some((id, verified_prev, sk, status)) = &existing {
         if status == "stored" {
             return (StatusCode::OK, Json(CompleteResponse {
@@ -116,6 +159,32 @@ pub async fn complete_artifact(State(state): State<AppState>, Json(req): Json<Co
                 status: status.clone(),
             })).into_response();
         } else if status == "pending" {
+            // Optional remote size verification if backend can provide it
+            let _verified_remote = true; // placeholder for future remote verification logic extension
+            if let Some(storage_key) = sk.as_ref() {
+                if std::env::var("AETHER_VERIFY_REMOTE_SIZE").ok().map(|v| v=="1" || v.eq_ignore_ascii_case("true")).unwrap_or(true) {
+                    let storage = get_storage().await;
+                    if let Ok(Some(actual)) = storage.backend().head_size(storage_key).await {
+                        if actual != req.size_bytes { return ApiError::new(StatusCode::BAD_REQUEST, "size_mismatch", format!("remote object size {} != reported {}", actual, req.size_bytes)).into_response(); }
+                    }
+                }
+                if std::env::var("AETHER_VERIFY_REMOTE_DIGEST").ok().map(|v| v=="1" || v.eq_ignore_ascii_case("true")).unwrap_or(true) {
+                    let storage = get_storage().await;
+                    if let Ok(Some(meta)) = storage.backend().head_metadata(storage_key).await {
+                        if let Some(remote) = meta.get("sha256") { if remote != &req.digest { DIGEST_MISMATCHES.inc(); return ApiError::new(StatusCode::BAD_REQUEST, "digest_mismatch_remote", format!("remote metadata sha256 {} != provided {}", remote, req.digest)).into_response(); } }
+                    }
+                }
+                // Optional remote hash verification (small objects only)
+                if std::env::var("AETHER_VERIFY_REMOTE_HASH").ok().map(|v| v=="1" || v.eq_ignore_ascii_case("true")).unwrap_or(false) {
+                    let max_bytes = std::env::var("AETHER_REMOTE_HASH_MAX_BYTES").ok().and_then(|v| v.parse::<i64>().ok()).unwrap_or(8_000_000); // 8MB default
+                    if max_bytes > 0 {
+                        let storage = get_storage().await;
+                        if let Ok(Some(remote_hash)) = storage.backend().remote_sha256(storage_key, max_bytes).await {
+                            if remote_hash != req.digest { DIGEST_MISMATCHES.inc(); return ApiError::new(StatusCode::BAD_REQUEST, "digest_mismatch_remote_hash", format!("remote hash {} != provided {}", remote_hash, req.digest)).into_response(); }
+                        }
+                    }
+                }
+            }
             // Update pending record with final size and optional signature
             let upd = sqlx::query("UPDATE artifacts SET app_id=$1, size_bytes=$2, signature=$3, verified=$4, storage_key=$5, status='stored' WHERE id=$6 RETURNING verified")
                 .bind(app_id)
@@ -137,7 +206,7 @@ pub async fn complete_artifact(State(state): State<AppState>, Json(req): Json<Co
                         status: "stored".into(),
                     })).into_response();
                 }
-                Err(e) => { error!(?e, "update_artifact_failed"); return ApiError::internal("db update").into_response(); }
+                Err(e) => { error!(?e, "update_artifact_failed"); COMPLETE_FAILURES.inc(); return ApiError::internal("db update").into_response(); }
             }
         }
     }
@@ -186,6 +255,7 @@ pub async fn complete_artifact(State(state): State<AppState>, Json(req): Json<Co
         Ok(row) => {
             let id: Uuid = row.get(0);
             ARTIFACTS_TOTAL.inc();
+            COMPLETE_DURATION.observe(start.elapsed().as_secs_f64());
             (StatusCode::OK, Json(CompleteResponse {
                 artifact_id: id.to_string(),
                 digest: req.digest,
@@ -195,7 +265,7 @@ pub async fn complete_artifact(State(state): State<AppState>, Json(req): Json<Co
                 status: "stored".into(),
             })).into_response()
         }
-        Err(e) => { error!(?e, "insert_artifact_failed"); ApiError::internal("db insert").into_response() }
+        Err(e) => { error!(?e, "insert_artifact_failed"); COMPLETE_FAILURES.inc(); ApiError::internal("db insert").into_response() }
     }
 }
 
@@ -280,6 +350,7 @@ pub async fn upload_artifact(State(state): State<AppState>, headers: HeaderMap, 
     let meta = fs::metadata(&final_path).ok();
     let size = meta.map(|m| m.len() as i64).unwrap_or(0);
     let url = format!("file://{}", final_path.display());
+    if let Ok(max_str) = std::env::var("AETHER_MAX_ARTIFACT_SIZE_BYTES") { if let Ok(max)=max_str.parse::<i64>() { if max>0 && (size as i64) > max { SIZE_EXCEEDED_FAILURES.inc(); let _ = fs::remove_file(&final_path); return ApiError::new(StatusCode::BAD_REQUEST, "size_exceeded", format!("artifact size {} exceeds max {}", size, max)).into_response(); } } }
     // Resolve app_id if app exists
     let app_id: Option<uuid::Uuid> = sqlx::query_scalar("SELECT id FROM applications WHERE name = $1")
         .bind(&app)
@@ -367,4 +438,19 @@ pub async fn list_artifacts(State(state): State<AppState>) -> impl IntoResponse 
         .fetch_all(&state.db).await
         .unwrap_or_default();
     Json(rows)
+}
+
+/// GC utility: run once deleting stale pending artifacts older than ttl_secs.
+#[allow(dead_code)]
+pub async fn run_pending_gc(db: &sqlx::Pool<sqlx::Postgres>, ttl_secs: i64) -> anyhow::Result<u64> {
+    use chrono::{Utc, Duration as ChronoDuration};
+    let cutoff = Utc::now() - ChronoDuration::seconds(ttl_secs.max(0));
+    // Use CTE for portability (DELETE not valid directly in FROM subquery across all Pg versions)
+    let deleted_res = sqlx::query_scalar::<_, i64>("WITH del AS (DELETE FROM artifacts WHERE status='pending' AND created_at < $1 RETURNING 1) SELECT COUNT(*) FROM del")
+        .bind(cutoff)
+        .fetch_one(db).await;
+    let deleted = match deleted_res { Ok(v)=>v, Err(e)=> { warn!(?e, "pending_gc_delete_failed"); 0 } };
+    PENDING_GC_RUNS.inc();
+    if deleted > 0 { PENDING_GC_DELETED.inc_by(deleted as u64); }
+    Ok(deleted as u64)
 }

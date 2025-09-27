@@ -23,8 +23,9 @@ pub struct StartupResponse { pub status: &'static str, pub pending_migrations: i
 #[utoipa::path(get, path = "/startupz", responses( (status=200, body=StartupResponse, description="OK"), (status=503, body=StartupResponse, description="Pending migrations") ))]
 pub async fn startupz(State(state): State<AppState>) -> (axum::http::StatusCode, Json<StartupResponse>) {
 	// Count applied vs available by querying _sqlx_migrations table (internal to sqlx migrate)
-	let applied = sqlx::query_scalar::<_, i64>("SELECT COUNT(1) FROM _sqlx_migrations")
-		.fetch_one(&state.db).await.unwrap_or(0);
+	let applied_res = sqlx::query_scalar::<_, i64>("SELECT COUNT(1) FROM _sqlx_migrations")
+		.fetch_one(&state.db).await;
+	let applied = match applied_res { Ok(v)=>v, Err(e)=> { tracing::warn!(?e, "startupz_migrations_count_failed"); 0 } };
 	// For simplicity we embed total known migrations at compile time via sqlx::migrate! macro listing.
 	// If mismatch -> pending.
 	let total = sqlx::migrate!().migrations.len() as i64;

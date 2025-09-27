@@ -26,10 +26,18 @@ tower-http = { version = "0.5", features = ["limit", "trace", "cors"] }
 sha2 = "0.10"
 ed25519-dalek = { version = "2", features = ["std","rand_core"] }
 hex = "0.4"
+aws-config = { version = "1", optional = true }
+aws-sdk-s3 = { version = "1", optional = true, default-features = true }
+async-trait = "0.1"
+
+[features]
+default = ["s3"]
+s3 = ["aws-config", "aws-sdk-s3"]
 
 [dev-dependencies]
 proptest = "1"
 serial_test = "3"
 rand = "0.8"
 futures = "0.3"
+reqwest = { workspace = true }
 

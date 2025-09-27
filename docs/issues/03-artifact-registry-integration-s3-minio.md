@@ -12,16 +12,21 @@ Checklist (✅ = done, ⏳ = in progress, 🔜 = planned)
 
 | Mục | Trạng thái | Ghi chú |
 |-----|------------|---------|
-| Endpoint `POST /artifacts/presign` (mock presign) | ✅ | Trả về upload URL, headers `x-amz-acl`, tạo bản ghi `pending` |
-| Endpoint `POST /artifacts/complete` | ✅ | Update từ `pending` → `stored` hoặc insert trực tiếp (legacy) |
-| Trạng thái artifact (`pending`/`stored`) | ✅ | Thêm cột `status`, head chỉ trả về 200 khi `stored` |
-| Cấu trúc key `artifacts/<app>/<digest>/app.tar.gz` | ✅ | Áp dụng ở presign + complete |
+| Endpoint `POST /artifacts/presign` (real S3 presign) | ✅ | AWS SDK V4 presign + metadata sha256 |
+| Endpoint `POST /artifacts/complete` | ✅ | Pending → stored; remote size & metadata digest verify |
+| Trạng thái artifact (`pending`/`stored`) | ✅ | Cột `status`, HEAD chỉ 200 khi `stored` |
+| Cấu trúc key `artifacts/<app>/<digest>/app.tar.gz` | ✅ | Chuẩn hoá key layout |
 | Idempotent presign (stored → method NONE) | ✅ | Pending: cấp lại URL để retry |
-| Idempotent complete (duplicate nếu stored) | ✅ | Trả về `duplicate=true` |
+| Idempotent complete (duplicate nếu stored) | ✅ | `duplicate=true` |
 | Signature verification ở complete | ✅ | Reuse public keys DB |
-| Metrics tổng số artifacts | ✅ | ARTIFACTS_TOTAL tăng ở update/insert stored |
+| Metrics tổng số artifacts | ✅ | Gauge init + increment |
+| Remote metadata + optional hash verify | ✅ | Metadata luôn, hash optional nhỏ (<= threshold) |
+| GC pending TTL | ✅ | Background loop + on-demand function |
+| Max artifact size enforcement | ✅ | Env `AETHER_MAX_ARTIFACT_SIZE_BYTES` |
+| Digest mismatch metric | ✅ | `artifact_digest_mismatch_total` |
+| Retry S3 HEAD/GET | ✅ | 3 attempts w/ backoff |
 | CLI tích hợp presign/complete | ⏳ | Chưa chuyển CLI, vẫn dùng upload cũ |
-| Thay thế hẳn upload multipart trực tiếp | 🔜 | Sẽ deprecate sau khi CLI đổi |
+| Thay thế hẳn upload multipart trực tiếp | 🔜 | Deprecate sau khi CLI đổi |
 
 ## 3. Acceptance
 | ID | Điều kiện | Kết quả | Trạng thái |
@@ -39,9 +44,10 @@ Checklist (✅ = done, ⏳ = in progress, 🔜 = planned)
 * Signature + duplicate + integrity tests tái sử dụng schema & upload tests trước.
 
 Thiếu / cần thêm (follow-up):
-* PUT thực tế (integration với MinIO container) xác thực object tồn tại.
-* Negative: complete khi chưa presign (hiện path vẫn hoạt động – cần quyết định có ép buộc presign không).
-* Negative: presign với digest không hợp lệ (đã check length/hex) – test riêng.
+* PUT thực tế (integration với MinIO) – ĐÃ có test S3 (skips nếu không bật env) ✅
+* Negative: complete khi chưa presign – đã hỗ trợ flag bắt buộc (`AETHER_REQUIRE_PRESIGN`) ✅
+* Negative: presign digest không hợp lệ – validation hiện có ✅
+* Remote hash verify path chưa test riêng (follow-up) ⏳
 
 ## 5. Thiết kế trạng thái
 `pending` – tạo lúc presign, `size_bytes=0`, chưa có chữ ký.
@@ -68,8 +74,23 @@ HEAD chỉ phản ánh `stored` giúp client phân biệt upload chưa finalize.
 |------|------|---------|
 | E1 | AWS / MinIO real presign (SDK hoặc chữ ký V4 thủ công) | High |
 | E2 | TTL + GC bản ghi `pending` quá hạn | Medium |
-| E3 | Validate kích thước object (HEAD / stat) so với `size_bytes` | High |
-| E4 | Optional server SHA256 re-hash bằng streaming từ remote (nếu nội bộ) | Low |
+| E3 | Validate kích thước object (HEAD / stat) so với `size_bytes` | ✅ (S3 HEAD) |
+| E4 | Optional server SHA256 re-hash bằng streaming từ remote (small objects) | ⏳ (threshold-based) |
+## 13. Env mới / cập nhật
+```
+AETHER_MAX_ARTIFACT_SIZE_BYTES=52428800          # Giới hạn kích thước (ví dụ 50MB)
+AETHER_PENDING_GC_INTERVAL_SECS=300              # Chu kỳ chạy GC pending
+AETHER_PENDING_GC_TTL_SECS=3600                 # TTL xoá pending > TTL
+AETHER_S3_ENDPOINT_URL=http://minio:9000        # Override endpoint (MinIO)
+AETHER_REQUIRE_PRESIGN=true                     # Ép buộc presign trước complete
+AETHER_VERIFY_REMOTE_SIZE=true                  # Bật HEAD size check (default true)
+AETHER_VERIFY_REMOTE_DIGEST=true                # Bật metadata digest check (default true)
+AETHER_VERIFY_REMOTE_HASH=false                 # Bật hash streaming nhỏ
+AETHER_REMOTE_HASH_MAX_BYTES=8000000            # Ngưỡng tối đa hash (8MB)
+AETHER_PRESIGN_EXPIRE_SECS=900                  # Thời gian hết hạn URL
+AETHER_ARTIFACT_BUCKET=artifacts                # Tên bucket
+AETHER_STORAGE_MODE=s3                          # Backend: s3 hoặc mock
+```
 | E5 | Thêm cột `completed_at` cho audit | Medium |
 | E6 | Metrics: presign count, complete latency histogram riêng | Medium |
 | E7 | Policy: bắt buộc presign (reject complete nếu không `pending`) | Medium |
