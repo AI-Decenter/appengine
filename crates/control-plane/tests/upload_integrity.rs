@@ -85,3 +85,19 @@ async fn upload_ok_and_duplicate() {
     let v2: serde_json::Value = serde_json::from_slice(&body2).unwrap();
     assert!(v2["duplicate"].as_bool().unwrap());
 }
+
+#[tokio::test]
+async fn upload_unauthorized() {
+    // Set tokens env to force auth requirement
+    std::env::set_var("AETHER_API_TOKENS", "tok1,tok2");
+    let Some(pool) = maybe_pool().await else { eprintln!("skipping (no db)"); return; };
+    let app_router = build_router(AppState { db: pool });
+    let (body_bytes, boundary) = multipart_body(vec![("app_name","demo")], Some(("artifact", b"abc".to_vec())));
+    let mut h = Sha256::new(); h.update(b"abc"); let dg = format!("{:x}", h.finalize());
+    let req = Request::builder().method("POST").uri("/artifacts")
+        .header("content-type", format!("multipart/form-data; boundary={}", boundary))
+        .header("x-aether-artifact-digest", dg)
+        .body(Body::from(body_bytes)).unwrap();
+    let resp = app_router.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}

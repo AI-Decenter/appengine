@@ -3,8 +3,8 @@ use axum::http::{StatusCode, HeaderMap};
 use axum::response::IntoResponse;
 use serde::Deserialize;
 use uuid::Uuid;
-use crate::{AppState, error::ApiError};
-use std::{fs, path::PathBuf, io::Write};
+use crate::{AppState, error::ApiError, telemetry::REGISTRY};
+use std::{fs, path::PathBuf, io::Write, time::Instant};
 use tracing::{info,error,warn};
 use sha2::{Sha256, Digest};
 use sqlx::Row;
@@ -13,6 +13,15 @@ use sqlx::Row;
 pub struct UploadForm { pub app_name: String }
 
 pub async fn upload_artifact(State(state): State<AppState>, headers: HeaderMap, mut multipart: axum::extract::Multipart) -> impl IntoResponse {
+    static ARTIFACT_UPLOAD_BYTES: once_cell::sync::Lazy<prometheus::IntCounter> = once_cell::sync::Lazy::new(|| {
+        let c = prometheus::IntCounter::new("artifact_upload_bytes_total", "Total uploaded artifact bytes (after write)").unwrap();
+        REGISTRY.register(Box::new(c.clone())).ok(); c
+    });
+    static ARTIFACT_UPLOAD_DURATION: once_cell::sync::Lazy<prometheus::Histogram> = once_cell::sync::Lazy::new(|| {
+        let h = prometheus::Histogram::with_opts(prometheus::HistogramOpts::new("artifact_upload_duration_seconds", "Artifact upload+verify duration seconds")).unwrap();
+        REGISTRY.register(Box::new(h.clone())).ok(); h
+    });
+    let start = Instant::now();
     // Validate headers
     let Some(digest_header) = headers.get("x-aether-artifact-digest").and_then(|v| v.to_str().ok()) else {
         return ApiError::new(StatusCode::BAD_REQUEST, "missing_digest", "X-Aether-Artifact-Digest required").into_response();
@@ -72,8 +81,13 @@ pub async fn upload_artifact(State(state): State<AppState>, headers: HeaderMap, 
     let meta = fs::metadata(&final_path).ok();
     let size = meta.map(|m| m.len() as i64).unwrap_or(0);
     let url = format!("file://{}", final_path.display());
+    // Resolve app_id if app exists
+    let app_id: Option<uuid::Uuid> = sqlx::query_scalar("SELECT id FROM applications WHERE name = $1")
+        .bind(&app)
+        .fetch_optional(&mut *conn).await.ok().flatten();
     // Insert artifact row
-    let rec = sqlx::query("INSERT INTO artifacts (app_id, digest, size_bytes, signature, sbom_url, manifest_url, verified) VALUES (NULL,$1,$2,$3,NULL,NULL,FALSE) RETURNING id")
+    let rec = sqlx::query("INSERT INTO artifacts (app_id, digest, size_bytes, signature, sbom_url, manifest_url, verified) VALUES ($1,$2,$3,$4,NULL,NULL,FALSE) RETURNING id")
+        .bind(app_id)
         .bind(&computed)
         .bind(size)
         .bind(signature.as_ref())
@@ -82,7 +96,9 @@ pub async fn upload_artifact(State(state): State<AppState>, headers: HeaderMap, 
         Ok(row)=> {
             let id: Uuid = row.get::<Uuid, _>(0);
             info!(app=%app, digest=%computed, artifact_id=%id, size_bytes=size, "artifact_uploaded");
-            (StatusCode::OK, Json(serde_json::json!({"artifact_url": url, "digest": computed, "duplicate": false }))).into_response()
+            ARTIFACT_UPLOAD_BYTES.inc_by(size as u64);
+            ARTIFACT_UPLOAD_DURATION.observe(start.elapsed().as_secs_f64());
+            (StatusCode::OK, Json(serde_json::json!({"artifact_url": url, "digest": computed, "duplicate": false, "app_linked": app_id.is_some() }))).into_response()
         }
         Err(e)=> { error!(?e, "db_insert_artifact_failed"); ApiError::internal("db insert").into_response() }
     }
