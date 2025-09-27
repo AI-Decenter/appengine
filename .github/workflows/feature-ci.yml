@@ -1,0 +1,291 @@
+name: Feature CI
+
+on:
+  push:
+    branches:
+      - 'feat/**'
+      - 'feature/**'
+  pull_request:
+    branches:
+      - main
+    paths-ignore:
+      - 'README.md'
+      - 'docs/**'
+      - '.github/ISSUE_TEMPLATE/**'
+
+concurrency:
+  group: feature-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUST_VERSION: 1.90.0
+
+jobs:
+  lint:
+    name: Lint (Clippy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: clippy
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: lint-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+      - name: Fetch deps
+        run: cargo fetch
+      - name: Clippy (deny warnings)
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Summary
+        if: always()
+        run: echo "Clippy OK" >> $GITHUB_STEP_SUMMARY
+
+  test-linux:
+    name: Tests (Linux + DB)
+    needs: lint
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/aether_dev
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_DB: aether_dev
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: test-linux-${{ hashFiles('Cargo.lock') }}
+      - name: Wait for Postgres
+        run: |
+          for i in {1..30}; do
+            pg_isready -h 127.0.0.1 -U postgres && break
+            sleep 1
+          done
+      - name: Install sqlx-cli
+        run: cargo install sqlx-cli --no-default-features --features native-tls,postgres
+      - name: Run migrations
+        working-directory: crates/control-plane
+        run: sqlx migrate run
+      - name: Build (debug)
+        run: cargo build --workspace --all-targets
+      - name: Run tests (full)
+        run: cargo test --workspace --all-features -- --nocapture
+      - name: Focused exit code tests
+        run: cargo test -p aether-cli --test exit_codes -- --nocapture
+      - name: Build release aether-cli
+        run: cargo build -p aether-cli --release
+      - name: Upload aether-cli binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aether-cli-linux
+          path: target/release/aether-cli
+          if-no-files-found: warn
+      - name: Report binary size
+        run: ls -lh target/release/aether-cli || true
+      - name: sqlx prepare (offline cache)
+        run: |
+          cargo sqlx prepare --workspace -- --all-targets
+          git diff --name-only --exit-code sqlx-data.json || { echo 'sqlx-data.json not updated. Please commit.'; exit 1; }
+
+  test-macos:
+    name: Tests (macOS)
+    needs: lint
+    runs-on: macos-latest
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/aether_dev
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: test-macos-${{ hashFiles('Cargo.lock') }}
+      - name: Install PostgreSQL 15 (Homebrew)
+        run: |
+          brew update
+          brew install postgresql@15
+          brew link postgresql@15 --force
+      - name: Start PostgreSQL service
+        run: |
+          brew services start postgresql@15
+          # Wait for server
+          for i in {1..30}; do
+            pg_isready -h 127.0.0.1 -p 5432 && break
+            sleep 1
+            if [ "$i" = "30" ]; then echo "Postgres failed to start"; exit 1; fi
+          done
+      - name: Initialize database
+        run: |
+          # Ensure superuser role 'postgres' exists with password
+          createuser -s postgres 2>/dev/null || true
+          psql -d postgres -c "ALTER ROLE postgres WITH SUPERUSER LOGIN PASSWORD 'postgres';" || true
+          # Create database if missing
+          if ! psql -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='aether_dev'" | grep -q 1; then
+            psql -d postgres -c "CREATE DATABASE aether_dev OWNER postgres;"
+          fi
+      - name: Run migrations
+        working-directory: crates/control-plane
+        run: |
+          cargo install sqlx-cli --no-default-features --features native-tls,postgres
+          sqlx migrate run
+      - name: Build (debug)
+        run: cargo build --workspace --all-targets
+      - name: Run full workspace tests (including control-plane)
+        run: cargo test --workspace --all-features -- --nocapture
+      - name: Build release aether-cli
+        run: cargo build -p aether-cli --release
+      - name: Upload aether-cli binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aether-cli-macos
+          path: target/release/aether-cli
+          if-no-files-found: warn
+
+  coverage:
+    name: Coverage (llvm-cov)
+    needs: test-linux
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/aether_dev
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_DB: aether_dev
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: llvm-tools-preview
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: coverage-${{ hashFiles('Cargo.lock') }}
+      - name: Wait for Postgres
+        run: |
+          for i in {1..30}; do
+            pg_isready -h 127.0.0.1 -U postgres && break
+            sleep 1
+          done
+      - name: Install sqlx-cli
+        run: cargo install sqlx-cli --no-default-features --features native-tls,postgres
+      - name: Run migrations
+        working-directory: crates/control-plane
+        run: sqlx migrate run
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      - name: Run coverage
+        run: |
+          cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info
+          cargo llvm-cov report --summary-only >> $GITHUB_STEP_SUMMARY
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: lcov.info
+
+  security:
+    name: Security / License (cargo-deny)
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: deny-${{ hashFiles('Cargo.lock') }}
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      - name: cargo deny check
+        run: cargo deny check
+
+  performance:
+    name: Performance (startup benchmark)
+    needs: test-linux
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - name: Build release CLI
+        run: cargo build -p aether-cli --release
+      - name: Install hyperfine
+        run: sudo apt-get update && sudo apt-get install -y hyperfine
+      - name: Benchmark startup (aether-cli --help)
+        run: |
+          hyperfine --warmup 3 'target/release/aether-cli --help' --export-json perf.json
+          cat perf.json
+          echo "### Startup Benchmark" >> $GITHUB_STEP_SUMMARY
+          jq '.results[0] | {mean:.mean, stddev:.stddev, user:.user, system:.system}' perf.json >> $GITHUB_STEP_SUMMARY
+
+  summary:
+    name: Pipeline Summary
+    needs: [lint, test-linux, test-macos, coverage, security, performance]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Final summary
+        run: |
+          echo "## Feature CI Summary" >> $GITHUB_STEP_SUMMARY
+          echo "Lint: ${{ needs.lint.result }}" >> $GITHUB_STEP_SUMMARY || true
+          echo "Tests (Linux + DB): ${{ needs['test-linux'].result }}" >> $GITHUB_STEP_SUMMARY || true
+          echo "Tests (macOS): ${{ needs['test-macos'].result }}" >> $GITHUB_STEP_SUMMARY || true
+          echo "Coverage: ${{ needs.coverage.result }}" >> $GITHUB_STEP_SUMMARY || true
+          echo "Security: ${{ needs.security.result }}" >> $GITHUB_STEP_SUMMARY || true
+          echo "Performance: ${{ needs.performance.result }}" >> $GITHUB_STEP_SUMMARY || true

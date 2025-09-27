@@ -7,5 +7,6 @@ node_modules/
 .env*
 !/appengine/.env.example
 Cargo.lock
-sqlx-data.json
+# Allow sqlx-data.json to be versioned for offline compile safety
+!sqlx-data.json
 coverage/
