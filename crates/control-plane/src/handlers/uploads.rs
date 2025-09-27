@@ -312,7 +312,7 @@ pub async fn upload_artifact(State(state): State<AppState>, headers: HeaderMap, 
         }
     }
     // Insert artifact row
-    let rec = sqlx::query("INSERT INTO artifacts (app_id, digest, size_bytes, signature, sbom_url, manifest_url, verified) VALUES ($1,$2,$3,$4,NULL,NULL,$5) RETURNING id")
+    let rec = sqlx::query("INSERT INTO artifacts (app_id, digest, size_bytes, signature, sbom_url, manifest_url, verified, status) VALUES ($1,$2,$3,$4,NULL,NULL,$5,'stored') RETURNING id")
         .bind(app_id)
         .bind(&computed)
         .bind(size)
@@ -349,7 +349,7 @@ pub struct UploadResponse { pub artifact_url: String, pub digest: String, pub du
 /// HEAD existence check for artifact by digest
 pub async fn head_artifact(State(state): State<AppState>, Path(digest): Path<String>) -> impl IntoResponse {
     if digest.len()!=64 || !digest.chars().all(|c| c.is_ascii_hexdigit()) { return StatusCode::BAD_REQUEST; }
-    let exists = sqlx::query_scalar::<_, i64>("SELECT 1 FROM artifacts WHERE digest=$1 AND status='stored'")
+    let exists = sqlx::query_scalar::<_, i64>("SELECT 1::BIGINT FROM artifacts WHERE digest=$1 AND status='stored'")
         .bind(&digest)
         .fetch_optional(&state.db).await.ok().flatten().is_some();
     if exists { StatusCode::OK } else { StatusCode::NOT_FOUND }

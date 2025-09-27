@@ -4,6 +4,7 @@ use tower::util::ServiceExt; // for oneshot
 use sha2::{Sha256, Digest};
 use ed25519_dalek::{SigningKey, Signature, Signer};
 use once_cell::sync::OnceCell;
+use tokio::sync::OnceCell as AsyncOnceCell;
 
 fn init_tracing() {
     static INIT: OnceCell<()> = OnceCell::new();
@@ -16,11 +17,16 @@ fn init_tracing() {
     });
 }
 
-// Helper to skip if no DATABASE_URL
-async fn maybe_pool() -> Option<sqlx::Pool<sqlx::Postgres>> {
+// Mandatory pool (fail fast if DATABASE_URL missing or unreachable) and run migrations once.
+async fn pool() -> sqlx::Pool<sqlx::Postgres> {
     init_tracing();
-    let url = std::env::var("DATABASE_URL").ok()?;
-    init_db(&url).await.ok()
+    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for tests (e.g. postgres://user:pass@localhost:5432/aether_dev)");
+    let pool = init_db(&url).await.expect("failed to init db");
+    static MIGRATED: AsyncOnceCell<()> = AsyncOnceCell::const_new();
+    MIGRATED.get_or_init(|| async {
+        sqlx::migrate!().run(&pool).await.expect("migrations failed");
+    }).await;
+    pool
 }
 
 async fn ensure_schema(pool: &sqlx::Pool<sqlx::Postgres>) {
@@ -59,8 +65,7 @@ fn multipart_body(fields: Vec<(&str, &str)>, file: Option<(&str, Vec<u8>)>) -> (
 
 #[tokio::test]
 async fn upload_missing_digest() {
-    let Some(pool) = maybe_pool().await else { eprintln!("skipping (no db)"); return; };
-    ensure_schema(&pool).await;
+    let pool = pool().await; ensure_schema(&pool).await;
     let app = build_router(AppState { db: pool });
     let (artifact_bytes, boundary) = multipart_body(vec![("app_name","demo")], Some(("artifact", b"data".to_vec())));
     let req = Request::builder().method("POST").uri("/artifacts")
@@ -72,8 +77,7 @@ async fn upload_missing_digest() {
 
 #[tokio::test]
 async fn upload_digest_mismatch() {
-    let Some(pool) = maybe_pool().await else { eprintln!("skipping (no db)"); return; };
-    ensure_schema(&pool).await;
+    let pool = pool().await; ensure_schema(&pool).await;
     let app = build_router(AppState { db: pool });
     let data = b"abcdef".to_vec();
     let (artifact_bytes, boundary) = multipart_body(vec![("app_name","demo")], Some(("artifact", data.clone())));
@@ -89,8 +93,7 @@ async fn upload_digest_mismatch() {
 
 #[tokio::test]
 async fn upload_ok_and_duplicate() {
-    let Some(pool) = maybe_pool().await else { eprintln!("skipping (no db)"); return; };
-    ensure_schema(&pool).await;
+    let pool = pool().await; ensure_schema(&pool).await;
     // Clean artifacts
     sqlx::query("DELETE FROM artifacts").execute(&pool).await.ok();
     let app = build_router(AppState { db: pool });
@@ -122,8 +125,7 @@ async fn upload_ok_and_duplicate() {
 
 #[tokio::test]
 async fn upload_with_verification_true() {
-    let Some(pool) = maybe_pool().await else { eprintln!("skipping (no db)"); return; };
-    ensure_schema(&pool).await;
+    let pool = pool().await; ensure_schema(&pool).await;
     sqlx::query("DELETE FROM artifacts").execute(&pool).await.ok();
     sqlx::query("DELETE FROM applications").execute(&pool).await.ok();
     sqlx::query("INSERT INTO applications (name) VALUES ($1)").bind("verifapp").execute(&pool).await.unwrap();
@@ -158,13 +160,15 @@ async fn upload_with_verification_true() {
     // HEAD existence
     let head_req = Request::builder().method("HEAD").uri(format!("/artifacts/{}", dgst)).body(Body::empty()).unwrap();
     let head_resp = app.clone().oneshot(head_req).await.unwrap();
-    assert_eq!(head_resp.status(), StatusCode::OK);
+    if head_resp.status()!=StatusCode::OK {
+        let st: Option<String> = sqlx::query_scalar("SELECT status FROM artifacts WHERE digest=$1").bind(&dgst).fetch_optional(&pool).await.unwrap();
+        panic!("expected HEAD 200, got {:?}, db status={:?}", head_resp.status(), st);
+    }
 }
 
 #[tokio::test]
 async fn presign_complete_idempotent() {
-    let Some(pool) = maybe_pool().await else { eprintln!("skipping (no db)"); return; };
-    ensure_schema(&pool).await;
+    let pool = pool().await; ensure_schema(&pool).await;
     sqlx::query("DELETE FROM artifacts").execute(&pool).await.ok();
     sqlx::query("DELETE FROM applications").execute(&pool).await.ok();
     sqlx::query("INSERT INTO applications (name) VALUES ($1)").bind("presignapp").execute(&pool).await.unwrap();
@@ -210,8 +214,7 @@ async fn upload_unauthorized() {
     // Preserve old value
     let prev = std::env::var("AETHER_API_TOKENS").ok();
     std::env::set_var("AETHER_API_TOKENS", "tok1,tok2");
-    let Some(pool) = maybe_pool().await else { eprintln!("skipping (no db)"); if let Some(v)=prev { std::env::set_var("AETHER_API_TOKENS", v); } else { std::env::remove_var("AETHER_API_TOKENS"); } return; };
-    ensure_schema(&pool).await;
+    let pool = pool().await; ensure_schema(&pool).await;
     // Build secured router (replicating auth logic from main)
     let tokens: Vec<String> = std::env::var("AETHER_API_TOKENS").unwrap().split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
     let secured = build_router(AppState { db: pool })
@@ -242,8 +245,7 @@ async fn upload_unauthorized() {
 
 #[tokio::test]
 async fn presign_creates_pending_and_head_not_found_until_complete() {
-    let Some(pool) = maybe_pool().await else { eprintln!("skipping (no db)"); return; };
-    ensure_schema(&pool).await;
+    let pool = pool().await; ensure_schema(&pool).await;
     sqlx::query("DELETE FROM artifacts").execute(&pool).await.ok();
     sqlx::query("DELETE FROM applications").execute(&pool).await.ok();
     sqlx::query("INSERT INTO applications (name) VALUES ($1)").bind("pendingapp").execute(&pool).await.unwrap();

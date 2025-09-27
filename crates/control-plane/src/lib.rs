@@ -94,9 +94,10 @@ mod tests {
 
     #[tokio::test]
     async fn health_ok() {
-    let pool = sqlx::postgres::PgPoolOptions::new().max_connections(1).connect(&std::env::var("DATABASE_URL").unwrap_or_default()).await.ok();
-    if pool.is_none() { eprintln!("skipping health_ok (no db)" ); return; }
-    let app = build_router(AppState { db: pool.unwrap() });
+    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for tests");
+    let pool = sqlx::postgres::PgPoolOptions::new().max_connections(5).connect(&url).await.unwrap();
+    sqlx::migrate!().run(&pool).await.unwrap();
+    let app = build_router(AppState { db: pool });
         let res = app.oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let body = axum::body::to_bytes(res.into_body(), 1024).await.unwrap();
@@ -107,8 +108,9 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn create_deployment_201() {
-        if std::env::var("DATABASE_URL").is_err() { eprintln!("skipping create_deployment_201 (no DATABASE_URL)" ); return; }
-        let pool = sqlx::postgres::PgPoolOptions::new().max_connections(1).connect(&std::env::var("DATABASE_URL").unwrap()).await.unwrap();
+    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let pool = sqlx::postgres::PgPoolOptions::new().max_connections(5).connect(&url).await.unwrap();
+    sqlx::migrate!().run(&pool).await.unwrap();
         sqlx::query("DELETE FROM deployments").execute(&pool).await.ok();
         sqlx::query("DELETE FROM applications").execute(&pool).await.ok();
         sqlx::query("INSERT INTO applications (name) VALUES ($1)").bind("app1").execute(&pool).await.unwrap();
@@ -125,8 +127,9 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn list_apps_empty() {
-        if std::env::var("DATABASE_URL").is_err() { eprintln!("skipping list_apps_empty (no DATABASE_URL)" ); return; }
-        let pool = sqlx::postgres::PgPoolOptions::new().max_connections(1).connect(&std::env::var("DATABASE_URL").unwrap()).await.unwrap();
+    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let pool = sqlx::postgres::PgPoolOptions::new().max_connections(5).connect(&url).await.unwrap();
+    sqlx::migrate!().run(&pool).await.unwrap();
         sqlx::query("DELETE FROM deployments").execute(&pool).await.ok();
         sqlx::query("DELETE FROM applications").execute(&pool).await.ok();
     let app_router = build_router(AppState { db: pool });
@@ -139,9 +142,10 @@ mod tests {
 
     #[tokio::test]
     async fn app_logs_empty() {
-    let pool = sqlx::postgres::PgPoolOptions::new().max_connections(1).connect(&std::env::var("DATABASE_URL").unwrap_or_default()).await.ok();
-    if pool.is_none() { eprintln!("skipping app_logs_empty (no db)" ); return; }
-    let app = build_router(AppState { db: pool.unwrap() });
+    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let pool = sqlx::postgres::PgPoolOptions::new().max_connections(5).connect(&url).await.unwrap();
+    sqlx::migrate!().run(&pool).await.unwrap();
+    let app = build_router(AppState { db: pool });
         let res = app.oneshot(Request::builder().uri("/apps/demo/logs").body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let body = axum::body::to_bytes(res.into_body(), 1024).await.unwrap();
@@ -150,9 +154,10 @@ mod tests {
 
     #[tokio::test]
     async fn readiness_ok() {
-    let pool = sqlx::postgres::PgPoolOptions::new().max_connections(1).connect(&std::env::var("DATABASE_URL").unwrap_or_default()).await.ok();
-    if pool.is_none() { eprintln!("skipping readiness_ok (no db)" ); return; }
-    let app = build_router(AppState { db: pool.unwrap() });
+    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let pool = sqlx::postgres::PgPoolOptions::new().max_connections(5).connect(&url).await.unwrap();
+    sqlx::migrate!().run(&pool).await.unwrap();
+    let app = build_router(AppState { db: pool });
         let res = app.oneshot(Request::builder().uri("/readyz").body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
     }
@@ -160,8 +165,9 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn create_deployment_bad_json() {
-        if std::env::var("DATABASE_URL").is_err() { eprintln!("skipping create_deployment_bad_json (no DATABASE_URL)" ); return; }
-        let pool = sqlx::postgres::PgPoolOptions::new().max_connections(1).connect(&std::env::var("DATABASE_URL").unwrap()).await.unwrap();
+    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let pool = sqlx::postgres::PgPoolOptions::new().max_connections(5).connect(&url).await.unwrap();
+    sqlx::migrate!().run(&pool).await.unwrap();
     let app_router = build_router(AppState { db: pool });
         let req = Request::builder().method("POST").uri("/deployments")
             .header("content-type","application/json")
@@ -174,8 +180,9 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn list_deployments_empty() {
-        if std::env::var("DATABASE_URL").is_err() { eprintln!("skipping list_deployments_empty (no DATABASE_URL)" ); return; }
-        let pool = sqlx::postgres::PgPoolOptions::new().max_connections(1).connect(&std::env::var("DATABASE_URL").unwrap()).await.unwrap();
+    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let pool = sqlx::postgres::PgPoolOptions::new().max_connections(5).connect(&url).await.unwrap();
+    sqlx::migrate!().run(&pool).await.unwrap();
         sqlx::query("DELETE FROM deployments").execute(&pool).await.ok();
         sqlx::query("DELETE FROM applications").execute(&pool).await.ok();
     let app_router = build_router(AppState { db: pool });
@@ -189,8 +196,9 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn app_deployments_flow() {
-        if std::env::var("DATABASE_URL").is_err() { eprintln!("skipping app_deployments_flow (no DATABASE_URL)" ); return; }
-        let pool = sqlx::postgres::PgPoolOptions::new().max_connections(1).connect(&std::env::var("DATABASE_URL").unwrap()).await.unwrap();
+    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let pool = sqlx::postgres::PgPoolOptions::new().max_connections(5).connect(&url).await.unwrap();
+    sqlx::migrate!().run(&pool).await.unwrap();
         sqlx::query("DELETE FROM deployments").execute(&pool).await.ok();
         sqlx::query("DELETE FROM applications").execute(&pool).await.ok();
         sqlx::query("INSERT INTO applications (name) VALUES ($1)").bind("appx").execute(&pool).await.unwrap();
@@ -207,8 +215,9 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn app_deployments_empty_when_no_deployments() {
-        if std::env::var("DATABASE_URL").is_err() { eprintln!("skipping app_deployments_empty_when_no_deployments (no DATABASE_URL)" ); return; }
-        let pool = sqlx::postgres::PgPoolOptions::new().max_connections(1).connect(&std::env::var("DATABASE_URL").unwrap()).await.unwrap();
+    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let pool = sqlx::postgres::PgPoolOptions::new().max_connections(5).connect(&url).await.unwrap();
+    sqlx::migrate!().run(&pool).await.unwrap();
         // Clean state
         sqlx::query("DELETE FROM deployments").execute(&pool).await.ok();
         sqlx::query("DELETE FROM applications").execute(&pool).await.ok();
@@ -225,8 +234,9 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn create_app_conflict_error_json() {
-        if std::env::var("DATABASE_URL").is_err() { eprintln!("skipping create_app_conflict_error_json (no DATABASE_URL)" ); return; }
-        let pool = sqlx::postgres::PgPoolOptions::new().max_connections(1).connect(&std::env::var("DATABASE_URL").unwrap()).await.unwrap();
+    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let pool = sqlx::postgres::PgPoolOptions::new().max_connections(5).connect(&url).await.unwrap();
+    sqlx::migrate!().run(&pool).await.unwrap();
         sqlx::query("DELETE FROM deployments").execute(&pool).await.ok();
         sqlx::query("DELETE FROM applications").execute(&pool).await.ok();
         sqlx::query("INSERT INTO applications (name) VALUES ($1)").bind("dupe").execute(&pool).await.unwrap();

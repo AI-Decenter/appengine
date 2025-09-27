@@ -31,4 +31,5 @@ hex = "0.4"
 proptest = "1"
 serial_test = "3"
 rand = "0.8"
+futures = "0.3"
 

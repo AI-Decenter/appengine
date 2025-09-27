@@ -14,8 +14,9 @@ fn init_tracing() {
 #[tokio::test]
 async fn schema_core_tables_exist() {
     init_tracing();
-    let Some(url) = std::env::var("DATABASE_URL").ok() else { eprintln!("skipping schema_core_tables_exist (no db)"); return; };
-    let pool = match init_db(&url).await { Ok(p)=>p, Err(e)=> { eprintln!("skipping (db init failed): {e}"); return; } };
+    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for tests");
+    let pool = init_db(&url).await.expect("db init failed");
+    sqlx::migrate!().run(&pool).await.expect("migrations failed");
     let required = ["applications","artifacts","public_keys","deployments"];
     for table in required {
         // Use EXISTS returning BOOL to avoid any driver int width decoding issues
