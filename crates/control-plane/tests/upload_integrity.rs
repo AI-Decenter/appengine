@@ -4,7 +4,6 @@ use tower::util::ServiceExt; // for oneshot
 use sha2::{Sha256, Digest};
 use ed25519_dalek::{SigningKey, Signature, Signer};
 use once_cell::sync::OnceCell;
-use tokio::sync::OnceCell as AsyncOnceCell;
 
 fn init_tracing() {
     static INIT: OnceCell<()> = OnceCell::new();
@@ -17,15 +16,16 @@ fn init_tracing() {
     });
 }
 
-// Mandatory pool (fail fast if DATABASE_URL missing or unreachable) and run migrations once.
+// Mandatory pool (fail fast if DATABASE_URL missing or unreachable) and run migrations each call.
 async fn pool() -> sqlx::Pool<sqlx::Postgres> {
     init_tracing();
     let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for tests (e.g. postgres://user:pass@localhost:5432/aether_dev)");
     let pool = init_db(&url).await.expect("failed to init db");
-    static MIGRATED: AsyncOnceCell<()> = AsyncOnceCell::const_new();
-    MIGRATED.get_or_init(|| async {
-        sqlx::migrate!().run(&pool).await.expect("migrations failed");
-    }).await;
+    // Always attempt to run migrations; they are idempotent and this ensures newly added
+    // migration files are applied even if earlier tests already initialized the OnceCell.
+    // This avoids stale schemas causing silent failures (e.g. ignored INSERT errors when
+    // referencing newly added columns during the same test process lifecycle).
+    sqlx::migrate!().run(&pool).await.expect("migrations failed");
     pool
 }
 
@@ -64,6 +64,7 @@ fn multipart_body(fields: Vec<(&str, &str)>, file: Option<(&str, Vec<u8>)>) -> (
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn upload_missing_digest() {
     let pool = pool().await; ensure_schema(&pool).await;
     let app = build_router(AppState { db: pool });
@@ -76,6 +77,7 @@ async fn upload_missing_digest() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn upload_digest_mismatch() {
     let pool = pool().await; ensure_schema(&pool).await;
     let app = build_router(AppState { db: pool });
@@ -92,6 +94,7 @@ async fn upload_digest_mismatch() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn upload_ok_and_duplicate() {
     let pool = pool().await; ensure_schema(&pool).await;
     // Clean artifacts
@@ -124,6 +127,7 @@ async fn upload_ok_and_duplicate() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn upload_with_verification_true() {
     let pool = pool().await; ensure_schema(&pool).await;
     sqlx::query("DELETE FROM artifacts").execute(&pool).await.ok();
@@ -167,6 +171,7 @@ async fn upload_with_verification_true() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn presign_complete_idempotent() {
     let pool = pool().await; ensure_schema(&pool).await;
     sqlx::query("DELETE FROM artifacts").execute(&pool).await.ok();
@@ -210,6 +215,7 @@ async fn presign_complete_idempotent() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn upload_unauthorized() {
     // Preserve old value
     let prev = std::env::var("AETHER_API_TOKENS").ok();
@@ -244,6 +250,7 @@ async fn upload_unauthorized() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn presign_creates_pending_and_head_not_found_until_complete() {
     let pool = pool().await; ensure_schema(&pool).await;
     sqlx::query("DELETE FROM artifacts").execute(&pool).await.ok();

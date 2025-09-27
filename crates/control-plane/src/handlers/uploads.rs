@@ -362,7 +362,8 @@ pub async fn head_artifact(State(state): State<AppState>, Path(digest): Path<Str
     tag = "aether"
 )]
 pub async fn list_artifacts(State(state): State<AppState>) -> impl IntoResponse {
-    let rows = sqlx::query_as::<_, Artifact>("SELECT id, app_id, digest, size_bytes, signature, sbom_url, manifest_url, verified, created_at FROM artifacts ORDER BY created_at DESC LIMIT 200")
+    // Select columns in the exact order of the Artifact struct definition.
+    let rows = sqlx::query_as::<_, Artifact>("SELECT id, app_id, digest, size_bytes, signature, sbom_url, manifest_url, verified, storage_key, status, created_at FROM artifacts ORDER BY created_at DESC LIMIT 200")
         .fetch_all(&state.db).await
         .unwrap_or_default();
     Json(rows)
