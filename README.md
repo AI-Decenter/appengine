@@ -181,6 +181,7 @@ On success (`200 OK`) the control plane returns:
 | `digest` | string | SHA-256 hex digest (server recomputed) |
 | `duplicate` | bool | True if digest already existed (idempotent; file not re-written) |
 | `app_linked` | bool | True if `app_name` matched an existing application and was linked |
+| `verified` | bool | True if an attached Ed25519 signature matched a registered application public key |
 
 Additional error codes related to artifact upload:
 | Code | HTTP | Semantics |
@@ -188,6 +189,39 @@ Additional error codes related to artifact upload:
 | `missing_digest` | 400 | Header `X-Aether-Artifact-Digest` absent |
 | `invalid_digest` | 400 | Malformed digest (length/hex) |
 | `digest_mismatch` | 400 | Provided digest did not match recomputed |
+
+### 4.3 Artifact Public Keys (Signature Verification)
+
+Register an Ed25519 public key for an application so subsequent uploads with header `X-Aether-Signature` over the digest value set `verified=true`.
+
+Endpoint:
+`POST /apps/{app_name}/public-keys`
+```
+{ "public_key_hex": "<64 hex chars>" }
+```
+Response `201 Created`:
+```
+{ "app_id": "<uuid>", "public_key_hex": "<hex>", "active": true }
+```
+
+Multiple keys per app are allowed (all `active=true` by default). Deactivation endpoint TBD.
+
+### 4.4 Artifact Existence Fast Path
+`HEAD /artifacts/{digest}` returns `200` if present, `404` if absent (no body). Enables the CLI to skip re‑uploads.
+
+### 4.5 Concurrency & Backpressure
+Uploads are limited by a semaphore (env: `AETHER_MAX_CONCURRENT_UPLOADS`, default `32`). Excess uploads await a permit, preventing resource exhaustion.
+
+### 4.6 Metrics (Prometheus)
+| Metric | Type | Description |
+|--------|------|-------------|
+| `artifact_upload_bytes_total` | Counter | Bytes successfully persisted (new uploads) |
+| `artifact_upload_duration_seconds` | Histogram | End-to-end upload + verify duration |
+| `artifact_uploads_in_progress` | Gauge | Concurrent in-flight uploads |
+| `artifacts_total` | Gauge | Total stored artifacts (initial load + increment on insert) |
+
+### 4.7 Security Scheme
+Bearer token auth (`Authorization: Bearer <token>`) configured via `AETHER_API_TOKENS` (CSV) or fallback `AETHER_API_TOKEN`. OpenAPI spec exposes a `bearer_auth` security scheme applied globally.
 
 ---
 

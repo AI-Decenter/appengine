@@ -40,12 +40,12 @@ Xác thực integrity (digest + chữ ký), lưu metadata artifact & thêm auth 
 * [x] Thêm chỉ số Prometheus: `artifact_upload_bytes_total`, `artifact_upload_duration_seconds`.
 * [x] Mở rộng OpenAPI với route /artifacts (schema Artifact) & error codes `missing_digest`, `digest_mismatch`.
 * [x] Document README: JSON upload response fields (`duplicate`, `app_linked`).
-* [ ] Nâng cấp verified=true sau khi có public key registry (Issue Supply Chain nâng cao).
-* (New) Follow-up: Thêm gauge số artifacts tổng (`artifacts_total`) hoặc derive từ SQL periodic task. (Priority: Medium – quan sát dashboard tổng quan)
-* (New) Follow-up: Backpressure / limit concurrent artifact writes (Semaphore layer). (Priority: High khi traffic tăng)
-* (New) Follow-up: OpenAPI security scheme cho Bearer Auth (hiện implicit). (Priority: Low)
-* (New) Follow-up: Tracing span cho từng chunk upload để debug latency (Priority: Low)
-* (New) Follow-up: Thêm endpoint HEAD /artifacts/{digest} cho existence check nhanh (Priority: Medium)
+* [x] Nâng cấp verified=true sau khi có public key registry (persist bảng `public_keys`, admin API add key, verification server-side active).
+* [x] Thêm gauge số artifacts tổng (`artifacts_total`) (tăng khi insert + init lúc startup).
+* [x] Backpressure / limit concurrent artifact writes (Semaphore qua env `AETHER_MAX_CONCURRENT_UPLOADS`).
+* [x] OpenAPI security scheme cho Bearer Auth (inject thủ công vào spec JSON).
+* [x] Tracing span cho bước signature verify (span `signature_verify` + event success/fail).
+* [x] Thêm endpoint HEAD /artifacts/{digest} cho existence check nhanh.
 | Rủi ro | Giảm thiểu |
 |--------|-----------|
 | Recompute hash tốn RAM | Stream từng chunk 64K |
