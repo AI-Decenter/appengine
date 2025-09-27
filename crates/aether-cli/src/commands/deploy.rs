@@ -27,7 +27,20 @@ struct ManifestEntry { path: String, size: u64, sha256: String }
 #[derive(Debug, Serialize)]
 struct Manifest { files: Vec<ManifestEntry>, total_files: usize, total_size: u64 }
 
-pub async fn handle(dry_run: bool, pack_only: bool, compression_level: u32, out: Option<String>, no_upload: bool, no_cache: bool, no_sbom: bool, format: Option<String>) -> Result<()> {
+#[derive(Debug)]
+pub struct DeployOptions {
+    pub dry_run: bool,
+    pub pack_only: bool,
+    pub compression_level: u32,
+    pub out: Option<String>,
+    pub no_upload: bool,
+    pub no_cache: bool,
+    pub no_sbom: bool,
+    pub format: Option<String>,
+}
+
+pub async fn handle(opts: DeployOptions) -> Result<()> {
+    let DeployOptions { dry_run, pack_only, compression_level, out, no_upload, no_cache, no_sbom, format } = opts;
     let root = Path::new(".");
     if !is_node_project(root) { return Err(CliError::new(CliErrorKind::Usage("not a NodeJS project (missing package.json)".into())).into()); }
     if dry_run { info!(event="deploy.dry_run", msg="Would run install + prune + package project"); return Ok(()); }

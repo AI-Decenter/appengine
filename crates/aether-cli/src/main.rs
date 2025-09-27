@@ -32,7 +32,7 @@ async fn dispatch(cli: Cli, _cfg: EffectiveConfig) -> Result<()> {
     let start = Instant::now();
     let result = match cli.command {
         Commands::Login { username } => { let _span = info_span!("cmd.login").entered(); commands::login::handle(username).await }
-    Commands::Deploy { dry_run, pack_only, compression_level, out, no_upload, no_cache, no_sbom, format } => { let _span = info_span!("cmd.deploy", dry_run, pack_only, compression_level, out=?out, no_upload, no_cache, no_sbom, format=?format); commands::deploy::handle(dry_run, pack_only, compression_level, out, no_upload, no_cache, no_sbom, format).await }
+    Commands::Deploy { dry_run, pack_only, compression_level, out, no_upload, no_cache, no_sbom, format } => { let _span = info_span!("cmd.deploy", dry_run, pack_only, compression_level, out=?out, no_upload, no_cache, no_sbom, format=?format); commands::deploy::handle(commands::deploy::DeployOptions { dry_run, pack_only, compression_level, out, no_upload, no_cache, no_sbom, format }).await }
         Commands::Logs { app } => { let _span = info_span!("cmd.logs"); commands::logs::handle(app).await }
         Commands::List {} => { let _span = info_span!("cmd.list"); commands::list::handle().await }
         Commands::Completions { shell } => { let _span = info_span!("cmd.completions"); commands::completions::handle(shell) }
