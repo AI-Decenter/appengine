@@ -3,11 +3,42 @@ use control_plane::{build_router, AppState, db::init_db};
 use tower::util::ServiceExt; // for oneshot
 use sha2::{Sha256, Digest};
 use ed25519_dalek::{SigningKey, Signature, Signer};
+use once_cell::sync::OnceCell;
+
+fn init_tracing() {
+    static INIT: OnceCell<()> = OnceCell::new();
+    let _ = INIT.get_or_init(|| {
+        let _ = tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .with_target(false)
+            .try_init();
+    });
+}
 
 // Helper to skip if no DATABASE_URL
 async fn maybe_pool() -> Option<sqlx::Pool<sqlx::Postgres>> {
+    init_tracing();
     let url = std::env::var("DATABASE_URL").ok()?;
     init_db(&url).await.ok()
+}
+
+async fn ensure_schema(pool: &sqlx::Pool<sqlx::Postgres>) {
+    // Basic presence checks for required tables
+    let required = ["applications", "artifacts", "public_keys", "deployments"];
+    for table in required { 
+        // Use information_schema to detect existence without failing on empty
+        let exists: Option<i64> = sqlx::query_scalar(
+            "SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = $1"
+        ).bind(table).fetch_optional(pool).await.unwrap();
+        assert!(exists.is_some(), "required table '{}' missing (run migrations)", table);
+    }
+    // Column-level check for artifacts
+    let cols: Vec<String> = sqlx::query_scalar(
+        "SELECT column_name FROM information_schema.columns WHERE table_name='artifacts' ORDER BY ordinal_position"
+    ).fetch_all(pool).await.unwrap();
+    let expected = ["id","app_id","digest","size_bytes","signature","sbom_url","manifest_url","verified","created_at"];
+    for e in expected { assert!(cols.contains(&e.to_string()), "artifacts column '{}' missing", e); }
 }
 
 fn multipart_body(fields: Vec<(&str, &str)>, file: Option<(&str, Vec<u8>)>) -> (Vec<u8>, String) {
@@ -30,6 +61,7 @@ fn multipart_body(fields: Vec<(&str, &str)>, file: Option<(&str, Vec<u8>)>) -> (
 #[tokio::test]
 async fn upload_missing_digest() {
     let Some(pool) = maybe_pool().await else { eprintln!("skipping (no db)"); return; };
+    ensure_schema(&pool).await;
     let app = build_router(AppState { db: pool });
     let (artifact_bytes, boundary) = multipart_body(vec![("app_name","demo")], Some(("artifact", b"data".to_vec())));
     let req = Request::builder().method("POST").uri("/artifacts")
@@ -42,6 +74,7 @@ async fn upload_missing_digest() {
 #[tokio::test]
 async fn upload_digest_mismatch() {
     let Some(pool) = maybe_pool().await else { eprintln!("skipping (no db)"); return; };
+    ensure_schema(&pool).await;
     let app = build_router(AppState { db: pool });
     let data = b"abcdef".to_vec();
     let (artifact_bytes, boundary) = multipart_body(vec![("app_name","demo")], Some(("artifact", data.clone())));
@@ -58,6 +91,7 @@ async fn upload_digest_mismatch() {
 #[tokio::test]
 async fn upload_ok_and_duplicate() {
     let Some(pool) = maybe_pool().await else { eprintln!("skipping (no db)"); return; };
+    ensure_schema(&pool).await;
     // Clean artifacts
     sqlx::query("DELETE FROM artifacts").execute(&pool).await.ok();
     let app = build_router(AppState { db: pool });
@@ -90,6 +124,7 @@ async fn upload_ok_and_duplicate() {
 #[tokio::test]
 async fn upload_with_verification_true() {
     let Some(pool) = maybe_pool().await else { eprintln!("skipping (no db)"); return; };
+    ensure_schema(&pool).await;
     sqlx::query("DELETE FROM artifacts").execute(&pool).await.ok();
     sqlx::query("DELETE FROM applications").execute(&pool).await.ok();
     sqlx::query("INSERT INTO applications (name) VALUES ($1)").bind("verifapp").execute(&pool).await.unwrap();
@@ -133,6 +168,7 @@ async fn upload_unauthorized() {
     let prev = std::env::var("AETHER_API_TOKENS").ok();
     std::env::set_var("AETHER_API_TOKENS", "tok1,tok2");
     let Some(pool) = maybe_pool().await else { eprintln!("skipping (no db)"); if let Some(v)=prev { std::env::set_var("AETHER_API_TOKENS", v); } else { std::env::remove_var("AETHER_API_TOKENS"); } return; };
+    ensure_schema(&pool).await;
     // Build secured router (replicating auth logic from main)
     let tokens: Vec<String> = std::env::var("AETHER_API_TOKENS").unwrap().split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
     let secured = build_router(AppState { db: pool })
