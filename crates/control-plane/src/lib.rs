@@ -4,6 +4,10 @@ pub mod models;
 pub mod error;
 pub mod services;
 pub mod telemetry;
+pub mod storage;
+
+// Re-export storage accessor to provide a stable import path even if the module path resolution behaves differently in some build contexts.
+pub use storage::get_storage;
 
 use axum::{Router, routing::{get, post}};
 use sqlx::{Pool, Postgres};
@@ -65,6 +69,16 @@ pub fn build_router(state: AppState) -> Router {
     // Initialize artifacts_total gauge asynchronously
     let db_clone = state.db.clone();
     tokio::spawn(async move { crate::handlers::uploads::init_artifacts_total(&db_clone).await; });
+    // Spawn pending artifact GC loop
+    let db_gc = state.db.clone();
+    tokio::spawn(async move {
+        let ttl = std::env::var("AETHER_PENDING_TTL_SECS").ok().and_then(|v| v.parse::<i64>().ok()).unwrap_or(3600);
+        let interval = std::env::var("AETHER_PENDING_GC_INTERVAL_SECS").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(60);
+        loop {
+            crate::handlers::uploads::run_pending_gc(&db_gc, ttl).await.ok();
+            tokio::time::sleep(std::time::Duration::from_secs(interval.max(5))).await;
+        }
+    });
     Router::new()
         .route("/health", get(health))
     .route("/readyz", get(readiness))

@@ -4,7 +4,8 @@ use axum::response::IntoResponse;
 use serde::Deserialize;
 use uuid::Uuid;
 use crate::{AppState, error::ApiError, telemetry::REGISTRY, models::Artifact};
-use crate::storage::get_storage;
+// Import re-exported get_storage from crate root (avoids direct module path dependency)
+use crate::get_storage;
 use utoipa::ToSchema;
 use std::{fs, path::PathBuf, io::Write, time::Instant};
 use tracing::{info,error,warn, span, Level};
