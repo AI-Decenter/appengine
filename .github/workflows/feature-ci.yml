@@ -114,6 +114,8 @@ jobs:
     name: Tests (macOS)
     needs: lint
     runs-on: macos-latest
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/aether_dev
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust toolchain
@@ -128,12 +130,34 @@ jobs:
             ~/.cargo/git
             target
           key: test-macos-${{ hashFiles('Cargo.lock') }}
+      - name: Install PostgreSQL 15 (Homebrew)
+        run: |
+          brew update
+          brew install postgresql@15
+          brew link postgresql@15 --force
+      - name: Start PostgreSQL service
+        run: |
+          brew services start postgresql@15
+          # Wait for server
+          for i in {1..30}; do
+            pg_isready -h 127.0.0.1 -p 5432 && break
+            sleep 1
+            if [ "$i" = "30" ]; then echo "Postgres failed to start"; exit 1; fi
+          done
+      - name: Initialize database
+        run: |
+          psql -d postgres -c "DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='postgres') THEN CREATE ROLE postgres LOGIN PASSWORD 'postgres'; END IF; END $$;" || true
+          psql -d postgres -c "ALTER ROLE postgres WITH PASSWORD 'postgres';" || true
+          psql -d postgres -c "CREATE DATABASE aether_dev OWNER postgres;" || true
+      - name: Run migrations
+        working-directory: crates/control-plane
+        run: |
+          cargo install sqlx-cli --no-default-features --features native-tls,postgres
+          sqlx migrate run
       - name: Build (debug)
         run: cargo build --workspace --all-targets
-      - name: Run tests (CLI + operator only)
-        run: |
-          cargo test -p aether-cli -p aether-operator --all-features -- --nocapture
-          echo "Skipped control-plane DB tests on macOS (Linux job covers them)." >> $GITHUB_STEP_SUMMARY
+      - name: Run full workspace tests (including control-plane)
+        run: cargo test --workspace --all-features -- --nocapture
       - name: Build release aether-cli
         run: cargo build -p aether-cli --release
       - name: Upload aether-cli binary artifact

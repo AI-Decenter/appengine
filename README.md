@@ -1,7 +1,14 @@
 # AetherEngine (MVP v1.0)
 
+![CI (Main)](https://github.com/askerNQK/appengine/actions/workflows/ci.yml/badge.svg)
+![Feature CI](https://github.com/askerNQK/appengine/actions/workflows/feature-ci.yml/badge.svg)
 ![Coverage](https://img.shields.io/badge/coverage-internal--lcov-lightgrey)
-<!-- TODO: Replace badge with dynamic value (Codecov or shields.io endpoint) once publishing workflow is added. -->
+<!-- Coverage badge is placeholder; replace with dynamic source (Codecov / shields endpoint) later. -->
+
+> Platform Test Matrix: Linux (Ubuntu) + macOS
+> * Linux: Full workspace (including Control Plane DB tests, migrations, schema drift, coverage, performance)
+> * macOS: Full workspace including Control Plane (PostgreSQL 15 via Homebrew service)
+> This ensures cross-platform parity for the CLI, operator, and control-plane.
 
 An internal Platform-as-a-Service (PaaS) designed to minimize application deployment latency and systematically elevate Developer Experience (DX) by transferring the entirety of the build pipeline (dependency resolution, compilation, packaging) to the client edge through a high‑performance Rust CLI. Rather than executing non‑deterministic server‑side builds, developers upload a pre‑assembled, production‑ready artifact. This model is intended to reduce end‑to‑end deployment latency from minutes to seconds while decreasing infrastructure consumption and variance.
 
