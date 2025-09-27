@@ -174,7 +174,7 @@ pub async fn init_artifacts_total(db: &sqlx::Pool<sqlx::Postgres>) {
     if INIT.get().is_some() { return; }
     if let Ok(count) = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM artifacts").fetch_one(db).await { 
         let g = once_cell::sync::Lazy::force(&ARTIFACTS_TOTAL);
-        g.set(count as i64);
+    g.set(count);
         INIT.set(()).ok();
     }
 }

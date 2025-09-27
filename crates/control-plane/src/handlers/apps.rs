@@ -82,7 +82,7 @@ pub async fn add_public_key(State(state): State<AppState>, Path(app_name): Path<
         .bind(&app_name).fetch_optional(&mut *tx).await.map_err(|e| ApiError::internal(format!("query app: {e}")))?;
     let Some(app) = app else { return Err(ApiError::not_found("application not found")); };
     // Insert ignore conflict
-    let res = sqlx::query("INSERT INTO public_keys (app_id, public_key_hex, active) VALUES ($1,$2,TRUE) ON CONFLICT (app_id, public_key_hex) DO UPDATE SET active=EXCLUDED.active RETURNING app_id")
+    let _res = sqlx::query("INSERT INTO public_keys (app_id, public_key_hex, active) VALUES ($1,$2,TRUE) ON CONFLICT (app_id, public_key_hex) DO UPDATE SET active=EXCLUDED.active RETURNING app_id")
         .bind(app.id)
         .bind(&body.public_key_hex)
         .fetch_one(&mut *tx).await.map_err(|e| ApiError::internal(format!("insert key: {e}")))?;
