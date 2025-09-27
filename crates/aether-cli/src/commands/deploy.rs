@@ -27,7 +27,7 @@ struct ManifestEntry { path: String, size: u64, sha256: String }
 #[derive(Debug, Serialize)]
 struct Manifest { files: Vec<ManifestEntry>, total_files: usize, total_size: u64 }
 
-pub async fn handle(dry_run: bool, pack_only: bool, compression_level: u32, out: Option<String>, no_upload: bool, no_cache: bool) -> Result<()> {
+pub async fn handle(dry_run: bool, pack_only: bool, compression_level: u32, out: Option<String>, no_upload: bool, no_cache: bool, format: Option<String>) -> Result<()> {
     let root = Path::new(".");
     if !is_node_project(root) { return Err(CliError::new(CliErrorKind::Usage("not a NodeJS project (missing package.json)".into())).into()); }
     if dry_run { info!(event="deploy.dry_run", msg="Would run install + prune + package project"); return Ok(()); }
@@ -63,13 +63,23 @@ pub async fn handle(dry_run: bool, pack_only: bool, compression_level: u32, out:
     write_manifest(&artifact_name, &manifest)?;
     generate_sbom(root, &artifact_name, &manifest)?;
     let size = fs::metadata(&artifact_name).map(|m| m.len()).unwrap_or(0);
-    println!("Artifact created: {} ({} bytes)", artifact_name.display(), size); // user-facing
+    let digest_clone = digest.clone();
+    let sig_path = artifact_name.with_file_name(format!("{}.sig", artifact_name.file_name().and_then(|s| s.to_str()).unwrap_or("artifact")));
+    let sbom_path = artifact_name.with_file_name(format!("{}.sbom.json", artifact_name.file_name().and_then(|s| s.to_str()).unwrap_or("artifact")));
+    let manifest_path = artifact_name.with_file_name(format!("{}.manifest.json", artifact_name.file_name().and_then(|s| s.to_str()).unwrap_or("artifact.tar.gz")));
+    if format.as_deref()==Some("json") {
+        #[derive(Serialize)] struct Out<'a> { artifact: &'a str, digest: &'a str, size_bytes: u64, manifest: String, sbom: String, signature: Option<String> }
+        let o = Out { artifact: &artifact_name.to_string_lossy(), digest: &digest_clone, size_bytes: size, manifest: manifest_path.to_string_lossy().to_string(), sbom: sbom_path.to_string_lossy().to_string(), signature: sig_path.exists().then(|| sig_path.to_string_lossy().to_string()) };
+        println!("{}", serde_json::to_string_pretty(&o)?);
+    } else {
+        println!("Artifact created: {} ({} bytes)", artifact_name.display(), size); // user-facing
+    }
     info!(event="deploy.artifact", artifact=%artifact_name.display(), size_bytes=size, sha256=%digest, files=%manifest.total_files);
     maybe_sign(&artifact_name, &digest)?;
 
     if !no_upload {
         if let Ok(base) = std::env::var("AETHER_API_BASE") {
-            match real_upload(&artifact_name, root, &base).await {
+            match real_upload(&artifact_name, root, &base, &digest, sig_path.exists().then(|| sig_path.clone())).await {
                 Ok(url)=> info!(event="deploy.upload", base=%base, artifact=%artifact_name.display(), status="ok", returned_url=%url),
                 Err(e)=> info!(event="deploy.upload", base=%base, artifact=%artifact_name.display(), status="error", err=%e)
             }
@@ -298,7 +308,7 @@ fn maybe_sign(artifact:&Path, digest:&str) -> Result<()> {
     Ok(())
 }
 
-async fn real_upload(artifact:&Path, root:&Path, base:&str) -> Result<String> {
+async fn real_upload(artifact:&Path, root:&Path, base:&str, digest:&str, sig: Option<PathBuf>) -> Result<String> {
     let pkg = parse_package_json(root);
     let app_name = pkg.as_ref().and_then(|p| p.name.clone()).unwrap_or_else(|| "default-app".into());
     let client = reqwest::Client::new();
@@ -316,7 +326,11 @@ async fn real_upload(artifact:&Path, root:&Path, base:&str) -> Result<String> {
     };
     let form = reqwest::multipart::Form::new().text("app_name", app_name.clone()).part("artifact", part);
     let url = format!("{}/artifacts", base.trim_end_matches('/'));
-    let resp = client.post(&url).multipart(form).send().await.map_err(|e| CliError::with_source(CliErrorKind::Runtime("upload request failed".into()), e))?;
+    let mut req = client.post(&url).multipart(form).header("X-Aether-Artifact-Digest", digest);
+    if let Some(sig_path) = sig {
+        if let Ok(content) = fs::read_to_string(&sig_path) { req = req.header("X-Aether-Signature", content.trim()); }
+    }
+    let resp = req.send().await.map_err(|e| CliError::with_source(CliErrorKind::Runtime("upload request failed".into()), e))?;
     if !resp.status().is_success() { return Err(CliError::new(CliErrorKind::Runtime(format!("upload failed status {}", resp.status()))).into()); }
     let v: serde_json::Value = resp.json().await.map_err(|e| CliError::with_source(CliErrorKind::Runtime("invalid upload response".into()), e))?;
     let artifact_url = v.get("artifact_url").and_then(|x| x.as_str()).unwrap_or("").to_string();

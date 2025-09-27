@@ -43,6 +43,8 @@ pub enum Commands {
         #[arg(long, default_value_t = false)] no_upload: bool,
         /// Vô hiệu cache node_modules (bỏ qua restore/save)
         #[arg(long, default_value_t = false)] no_cache: bool,
+        /// Định dạng output: text|json (json in ra metadata artifact)
+        #[arg(long, default_value = "text")] format: Option<String>,
     },
     /// Mock hiển thị log gần nhất
     Logs { #[arg(long)] app: Option<String> },
