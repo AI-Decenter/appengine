@@ -88,6 +88,7 @@ aether deploy --dry-run
 aether deploy
 aether --log-format json list
 aether completions --shell bash > aether.bash
+aether deploy --format json --no-sbom --pack-only
 ```
 
 Configuration:
@@ -109,6 +110,21 @@ Exit Codes:
 Performance:
 Target cold start <150ms (local); CI threshold set to <800ms for noise tolerance.
 
+### 3.2 Deploy JSON Output
+
+When invoking `aether deploy --format json`, the CLI prints a single JSON object to stdout (logs remain on stderr) with the following stable fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `artifact` | string | Path to generated `.tar.gz` artifact |
+| `digest` | string (hex sha256) | Content hash of packaged files (streaming computed) |
+| `size_bytes` | number | Size of artifact on disk |
+| `manifest` | string | Path to manifest file listing per‑file hashes |
+| `sbom` | string|null | Path to SBOM (`.sbom.json`) or null when `--no-sbom` supplied |
+| `signature` | string|null | Path to signature file when `AETHER_SIGNING_KEY` provided |
+
+Error Behavior (JSON mode): currently non‑zero failures may still emit human readable text before JSON; future work will standardize an error envelope `{ "error": { code, message } }` (tracked in Issue 01 follow-up – now resolved in this branch by suppressing SBOM generation when skipped).
+
 ---
 
 ## 4. Control Plane
@@ -123,6 +139,8 @@ Representative Endpoints (MVP subset):
 * `POST /deployments` – Register new deployment (idempotent via artifact digest)
 * `GET /apps/{app}/logs` – Stream or tail logs (upgrade: WebSocket or chunked HTTP)
 * `GET /apps/{app}/deployments` – List historical deployments
+* `POST /artifacts` – Upload artifact (headers: `X-Aether-Artifact-Digest`, optional `X-Aether-Signature`)
+* `GET /artifacts` – List recent artifacts (metadata only)
 * `GET /healthz`, `GET /readyz` – Liveness / readiness probes
 
 ### 4.1 Error Format
@@ -152,6 +170,24 @@ Design Notes:
 * `message` intentionally human oriented; avoid leaking internal stack traces.
 * Additional diagnostic fields (e.g. `details`, `trace_id`) may be added when tracing is wired.
 * Non-error (2xx) responses never include this envelope.
+
+### 4.2 Artifact Upload JSON Fields
+
+On success (`200 OK`) the control plane returns:
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `artifact_url` | string | Location reference (currently file URI mock) |
+| `digest` | string | SHA-256 hex digest (server recomputed) |
+| `duplicate` | bool | True if digest already existed (idempotent; file not re-written) |
+| `app_linked` | bool | True if `app_name` matched an existing application and was linked |
+
+Additional error codes related to artifact upload:
+| Code | HTTP | Semantics |
+|------|------|-----------|
+| `missing_digest` | 400 | Header `X-Aether-Artifact-Digest` absent |
+| `invalid_digest` | 400 | Malformed digest (length/hex) |
+| `digest_mismatch` | 400 | Provided digest did not match recomputed |
 
 ---
 

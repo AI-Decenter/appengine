@@ -3,7 +3,8 @@ use axum::http::{StatusCode, HeaderMap};
 use axum::response::IntoResponse;
 use serde::Deserialize;
 use uuid::Uuid;
-use crate::{AppState, error::ApiError, telemetry::REGISTRY};
+use crate::{AppState, error::ApiError, telemetry::REGISTRY, models::Artifact};
+use utoipa::{ToSchema, IntoParams};
 use std::{fs, path::PathBuf, io::Write, time::Instant};
 use tracing::{info,error,warn};
 use sha2::{Sha256, Digest};
@@ -12,6 +13,16 @@ use sqlx::Row;
 #[derive(Deserialize)]
 pub struct UploadForm { pub app_name: String }
 
+#[utoipa::path(
+    post,
+    path = "/artifacts",
+    responses(
+        (status = 200, description = "Artifact uploaded or duplicate", body = UploadResponse),
+        (status = 400, description = "Missing or invalid digest", body = crate::error::ApiErrorBody),
+        (status = 401, description = "Unauthorized"),
+    ),
+    tag = "aether"
+)]
 pub async fn upload_artifact(State(state): State<AppState>, headers: HeaderMap, mut multipart: axum::extract::Multipart) -> impl IntoResponse {
     static ARTIFACT_UPLOAD_BYTES: once_cell::sync::Lazy<prometheus::IntCounter> = once_cell::sync::Lazy::new(|| {
         let c = prometheus::IntCounter::new("artifact_upload_bytes_total", "Total uploaded artifact bytes (after write)").unwrap();
@@ -21,7 +32,12 @@ pub async fn upload_artifact(State(state): State<AppState>, headers: HeaderMap, 
         let h = prometheus::Histogram::with_opts(prometheus::HistogramOpts::new("artifact_upload_duration_seconds", "Artifact upload+verify duration seconds")).unwrap();
         REGISTRY.register(Box::new(h.clone())).ok(); h
     });
+    static ARTIFACT_ACTIVE_GAUGE: once_cell::sync::Lazy<prometheus::IntGauge> = once_cell::sync::Lazy::new(|| {
+        let g = prometheus::IntGauge::new("artifact_uploads_in_progress", "Concurrent artifact uploads in progress").unwrap();
+        REGISTRY.register(Box::new(g.clone())).ok(); g
+    });
     let start = Instant::now();
+    ARTIFACT_ACTIVE_GAUGE.inc();
     // Validate headers
     let Some(digest_header) = headers.get("x-aether-artifact-digest").and_then(|v| v.to_str().ok()) else {
         return ApiError::new(StatusCode::BAD_REQUEST, "missing_digest", "X-Aether-Artifact-Digest required").into_response();
@@ -98,8 +114,30 @@ pub async fn upload_artifact(State(state): State<AppState>, headers: HeaderMap, 
             info!(app=%app, digest=%computed, artifact_id=%id, size_bytes=size, "artifact_uploaded");
             ARTIFACT_UPLOAD_BYTES.inc_by(size as u64);
             ARTIFACT_UPLOAD_DURATION.observe(start.elapsed().as_secs_f64());
-            (StatusCode::OK, Json(serde_json::json!({"artifact_url": url, "digest": computed, "duplicate": false, "app_linked": app_id.is_some() }))).into_response()
+            (StatusCode::OK, Json(serde_json::json!(UploadResponse { artifact_url: url, digest: computed, duplicate: false, app_linked: app_id.is_some() })) ).into_response()
         }
         Err(e)=> { error!(?e, "db_insert_artifact_failed"); ApiError::internal("db insert").into_response() }
     }
+}
+
+impl DropGuard {
+    fn new() -> Self { Self }
+}
+struct DropGuard;
+impl Drop for DropGuard { fn drop(&mut self) { if let Some(g) = std::thread::panicking().then(|| ()).is_none().then_some(()) { let _ = g; } } }
+
+#[derive(serde::Serialize, ToSchema)]
+pub struct UploadResponse { pub artifact_url: String, pub digest: String, pub duplicate: bool, pub app_linked: bool }
+
+#[utoipa::path(
+    get,
+    path = "/artifacts",
+    responses( (status = 200, description = "List artifacts", body = [Artifact]) ),
+    tag = "aether"
+)]
+pub async fn list_artifacts(State(state): State<AppState>) -> impl IntoResponse {
+    let rows = sqlx::query_as::<_, Artifact>("SELECT id, app_id, digest, size_bytes, signature, sbom_url, manifest_url, verified, created_at FROM artifacts ORDER BY created_at DESC LIMIT 200")
+        .fetch_all(&state.db).await
+        .unwrap_or_default();
+    Json(rows)
 }

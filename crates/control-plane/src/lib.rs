@@ -7,7 +7,7 @@ pub mod telemetry;
 
 use axum::{Router, routing::{get, post}};
 use sqlx::{Pool, Postgres};
-use handlers::{health::health, apps::{list_apps, app_logs, create_app, app_deployments}, deployments::{create_deployment, list_deployments}, readiness::readiness, uploads::upload_artifact};
+use handlers::{health::health, apps::{list_apps, app_logs, create_app, app_deployments}, deployments::{create_deployment, list_deployments}, readiness::readiness, uploads::{upload_artifact, list_artifacts}};
 use utoipa::OpenApi;
 use crate::telemetry::metrics_handler;
 use axum::response::Html;
@@ -25,7 +25,9 @@ pub struct AppState { pub db: Pool<Postgres> }
         handlers::apps::list_apps,
         handlers::apps::app_deployments,
         handlers::deployments::create_deployment,
-        handlers::deployments::list_deployments,
+    handlers::deployments::list_deployments,
+    handlers::uploads::upload_artifact,
+    handlers::uploads::list_artifacts,
     ),
     components(schemas(error::ApiErrorBody)),
     tags( (name = "aether", description = "Aether Control Plane API") )
@@ -56,7 +58,7 @@ pub fn build_router(state: AppState) -> Router {
     .route("/startupz", get(handlers::readiness::startupz))
         .route("/metrics", get(metrics_handler))
     .route("/deployments", post(create_deployment).get(list_deployments))
-    .route("/artifacts", post(upload_artifact))
+    .route("/artifacts", post(upload_artifact).get(list_artifacts))
         .route("/apps", post(create_app))
         .route("/apps", get(list_apps))
         .route("/apps/:app_name/deployments", get(app_deployments))

@@ -38,11 +38,14 @@ Xác thực integrity (digest + chữ ký), lưu metadata artifact & thêm auth 
 * [x] Bổ sung lưu `app_id` nếu `app_name` map vào applications (lookup + link) (trả về `app_linked`).
 * [x] Trả về field `duplicate` = true/false (đã thêm) – cần document README / OpenAPI follow-up.
 * [x] Thêm chỉ số Prometheus: `artifact_upload_bytes_total`, `artifact_upload_duration_seconds`.
-* [ ] Mở rộng OpenAPI với route /artifacts (schema Artifact) & error codes `missing_digest`, `digest_mismatch`.
-* [ ] Document README: JSON upload response fields (`duplicate`, `app_linked`).
+* [x] Mở rộng OpenAPI với route /artifacts (schema Artifact) & error codes `missing_digest`, `digest_mismatch`.
+* [x] Document README: JSON upload response fields (`duplicate`, `app_linked`).
 * [ ] Nâng cấp verified=true sau khi có public key registry (Issue Supply Chain nâng cao).
-* (New) Follow-up: Thêm gauge số artifacts tổng (`artifacts_total`) hoặc derive từ SQL periodic task.
-* (New) Follow-up: Backpressure / limit concurrent artifact writes (Semaphore layer).
+* (New) Follow-up: Thêm gauge số artifacts tổng (`artifacts_total`) hoặc derive từ SQL periodic task. (Priority: Medium – quan sát dashboard tổng quan)
+* (New) Follow-up: Backpressure / limit concurrent artifact writes (Semaphore layer). (Priority: High khi traffic tăng)
+* (New) Follow-up: OpenAPI security scheme cho Bearer Auth (hiện implicit). (Priority: Low)
+* (New) Follow-up: Tracing span cho từng chunk upload để debug latency (Priority: Low)
+* (New) Follow-up: Thêm endpoint HEAD /artifacts/{digest} cho existence check nhanh (Priority: Medium)
 | Rủi ro | Giảm thiểu |
 |--------|-----------|
 | Recompute hash tốn RAM | Stream từng chunk 64K |
