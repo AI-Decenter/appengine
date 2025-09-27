@@ -147,6 +147,18 @@ jobs:
     name: Coverage (llvm-cov)
     needs: test-linux
     runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/aether_dev
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_DB: aether_dev
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust toolchain
@@ -162,6 +174,17 @@ jobs:
             ~/.cargo/git
             target
           key: coverage-${{ hashFiles('Cargo.lock') }}
+      - name: Wait for Postgres
+        run: |
+          for i in {1..30}; do
+            pg_isready -h 127.0.0.1 -U postgres && break
+            sleep 1
+          done
+      - name: Install sqlx-cli
+        run: cargo install sqlx-cli --no-default-features --features native-tls,postgres
+      - name: Run migrations
+        working-directory: crates/control-plane
+        run: sqlx migrate run
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@v2
         with:
