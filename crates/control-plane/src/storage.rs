@@ -52,7 +52,7 @@ impl StorageBackend for S3StorageBackend {
     }
     async fn head_size(&self, key:&str) -> anyhow::Result<Option<i64>> {
         match self.client.head_object().bucket(&self.bucket).key(key).send().await {
-            Ok(out)=> Ok(out.content_length().map(|l| l as i64)),
+            Ok(out)=> Ok(out.content_length()),
             Err(e)=> { warn!(?e, key, "s3_head_object_failed"); Ok(None) }
         }
     }

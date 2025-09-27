@@ -350,7 +350,7 @@ pub async fn upload_artifact(State(state): State<AppState>, headers: HeaderMap, 
     let meta = fs::metadata(&final_path).ok();
     let size = meta.map(|m| m.len() as i64).unwrap_or(0);
     let url = format!("file://{}", final_path.display());
-    if let Ok(max_str) = std::env::var("AETHER_MAX_ARTIFACT_SIZE_BYTES") { if let Ok(max)=max_str.parse::<i64>() { if max>0 && (size as i64) > max { SIZE_EXCEEDED_FAILURES.inc(); let _ = fs::remove_file(&final_path); return ApiError::new(StatusCode::BAD_REQUEST, "size_exceeded", format!("artifact size {} exceeds max {}", size, max)).into_response(); } } }
+    if let Ok(max_str) = std::env::var("AETHER_MAX_ARTIFACT_SIZE_BYTES") { if let Ok(max)=max_str.parse::<i64>() { if max>0 && size > max { SIZE_EXCEEDED_FAILURES.inc(); let _ = fs::remove_file(&final_path); return ApiError::new(StatusCode::BAD_REQUEST, "size_exceeded", format!("artifact size {} exceeds max {}", size, max)).into_response(); } } }
     // Resolve app_id if app exists
     let app_id: Option<uuid::Uuid> = sqlx::query_scalar("SELECT id FROM applications WHERE name = $1")
         .bind(&app)
