@@ -45,3 +45,4 @@ assert_cmd = "2"
 tempfile = "3"
 proptest = "1"
 axum = { workspace = true }
+rand = "0.8"

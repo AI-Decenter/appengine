@@ -27,7 +27,7 @@ struct ManifestEntry { path: String, size: u64, sha256: String }
 #[derive(Debug, Serialize)]
 struct Manifest { files: Vec<ManifestEntry>, total_files: usize, total_size: u64 }
 
-pub async fn handle(dry_run: bool, pack_only: bool, compression_level: u32, out: Option<String>, no_upload: bool, no_cache: bool, format: Option<String>) -> Result<()> {
+pub async fn handle(dry_run: bool, pack_only: bool, compression_level: u32, out: Option<String>, no_upload: bool, no_cache: bool, no_sbom: bool, format: Option<String>) -> Result<()> {
     let root = Path::new(".");
     if !is_node_project(root) { return Err(CliError::new(CliErrorKind::Usage("not a NodeJS project (missing package.json)".into())).into()); }
     if dry_run { info!(event="deploy.dry_run", msg="Would run install + prune + package project"); return Ok(()); }
@@ -61,15 +61,15 @@ pub async fn handle(dry_run: bool, pack_only: bool, compression_level: u32, out:
 
     create_artifact(root, &paths, &artifact_name, compression_level)?;
     write_manifest(&artifact_name, &manifest)?;
-    generate_sbom(root, &artifact_name, &manifest)?;
+    if !no_sbom { generate_sbom(root, &artifact_name, &manifest)?; } else { info!(event="deploy.sbom", status="skipped_no_sbom_flag"); }
     let size = fs::metadata(&artifact_name).map(|m| m.len()).unwrap_or(0);
     let digest_clone = digest.clone();
     let sig_path = artifact_name.with_file_name(format!("{}.sig", artifact_name.file_name().and_then(|s| s.to_str()).unwrap_or("artifact")));
     let sbom_path = artifact_name.with_file_name(format!("{}.sbom.json", artifact_name.file_name().and_then(|s| s.to_str()).unwrap_or("artifact")));
     let manifest_path = artifact_name.with_file_name(format!("{}.manifest.json", artifact_name.file_name().and_then(|s| s.to_str()).unwrap_or("artifact.tar.gz")));
     if format.as_deref()==Some("json") {
-        #[derive(Serialize)] struct Out<'a> { artifact: &'a str, digest: &'a str, size_bytes: u64, manifest: String, sbom: String, signature: Option<String> }
-        let o = Out { artifact: &artifact_name.to_string_lossy(), digest: &digest_clone, size_bytes: size, manifest: manifest_path.to_string_lossy().to_string(), sbom: sbom_path.to_string_lossy().to_string(), signature: sig_path.exists().then(|| sig_path.to_string_lossy().to_string()) };
+        #[derive(Serialize)] struct Out<'a> { artifact: &'a str, digest: &'a str, size_bytes: u64, manifest: String, sbom: Option<String>, signature: Option<String> }
+        let o = Out { artifact: &artifact_name.to_string_lossy(), digest: &digest_clone, size_bytes: size, manifest: manifest_path.to_string_lossy().to_string(), sbom: if no_sbom { None } else { Some(sbom_path.to_string_lossy().to_string()) }, signature: sig_path.exists().then(|| sig_path.to_string_lossy().to_string()) };
         println!("{}", serde_json::to_string_pretty(&o)?);
     } else {
         println!("Artifact created: {} ({} bytes)", artifact_name.display(), size); // user-facing
