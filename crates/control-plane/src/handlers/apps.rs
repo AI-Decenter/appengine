@@ -63,3 +63,30 @@ pub async fn app_deployments(State(state): State<AppState>, Path(app_name): Path
         })?;
     Ok(Json(rows.into_iter().map(|d| AppDeploymentItem { id: d.id, artifact_url: d.artifact_url, status: d.status }).collect()))
 }
+
+#[derive(Deserialize, ToSchema)]
+pub struct AddPublicKeyReq { pub public_key_hex: String }
+
+#[derive(Serialize, ToSchema)]
+pub struct AddPublicKeyResp { pub app_id: uuid::Uuid, pub public_key_hex: String, pub active: bool }
+
+/// Add (or upsert activate) a public key for an application used to verify artifact signatures.
+#[utoipa::path(post, path = "/apps/{app_name}/public-keys", request_body = AddPublicKeyReq, params(("app_name"=String, Path, description="Application name")), responses( (status=201, body=AddPublicKeyResp), (status=400, body=ApiErrorBody), (status=404, body=ApiErrorBody), (status=409, body=ApiErrorBody) ))]
+#[tracing::instrument(level="info", skip(state, body), fields(app_name=%app_name))]
+pub async fn add_public_key(State(state): State<AppState>, Path(app_name): Path<String>, Json(body): Json<AddPublicKeyReq>) -> ApiResult<(StatusCode, Json<AddPublicKeyResp>)> {
+    if body.public_key_hex.len() != 64 || !body.public_key_hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(ApiError::bad_request("public_key_hex must be 64 hex chars"));
+    }
+    let mut tx = state.db.begin().await.map_err(|e| ApiError::internal(format!("tx begin: {e}")))?;
+    let app: Option<Application> = sqlx::query_as::<_, Application>("SELECT id, name, created_at, updated_at FROM applications WHERE name=$1")
+        .bind(&app_name).fetch_optional(&mut *tx).await.map_err(|e| ApiError::internal(format!("query app: {e}")))?;
+    let Some(app) = app else { return Err(ApiError::not_found("application not found")); };
+    // Insert ignore conflict
+    let res = sqlx::query("INSERT INTO public_keys (app_id, public_key_hex, active) VALUES ($1,$2,TRUE) ON CONFLICT (app_id, public_key_hex) DO UPDATE SET active=EXCLUDED.active RETURNING app_id")
+        .bind(app.id)
+        .bind(&body.public_key_hex)
+        .fetch_one(&mut *tx).await.map_err(|e| ApiError::internal(format!("insert key: {e}")))?;
+    tx.commit().await.map_err(|e| ApiError::internal(format!("commit: {e}")))?;
+    tracing::info!(app_id=%app.id, "public_key_added");
+    Ok((StatusCode::CREATED, Json(AddPublicKeyResp { app_id: app.id, public_key_hex: body.public_key_hex, active: true })))
+}

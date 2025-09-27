@@ -2,6 +2,7 @@ use axum::{body::Body, http::{Request, StatusCode}, middleware};
 use control_plane::{build_router, AppState, db::init_db};
 use tower::util::ServiceExt; // for oneshot
 use sha2::{Sha256, Digest};
+use ed25519_dalek::{SigningKey, Signature, Signer};
 
 // Helper to skip if no DATABASE_URL
 async fn maybe_pool() -> Option<sqlx::Pool<sqlx::Postgres>> {
@@ -84,6 +85,46 @@ async fn upload_ok_and_duplicate() {
     let body2 = axum::body::to_bytes(resp2.into_body(), 1024).await.unwrap();
     let v2: serde_json::Value = serde_json::from_slice(&body2).unwrap();
     assert!(v2["duplicate"].as_bool().unwrap());
+}
+
+#[tokio::test]
+async fn upload_with_verification_true() {
+    let Some(pool) = maybe_pool().await else { eprintln!("skipping (no db)"); return; };
+    sqlx::query("DELETE FROM artifacts").execute(&pool).await.ok();
+    sqlx::query("DELETE FROM applications").execute(&pool).await.ok();
+    sqlx::query("INSERT INTO applications (name) VALUES ($1)").bind("verifapp").execute(&pool).await.unwrap();
+    let app = build_router(AppState { db: pool.clone() });
+    // Generate key
+    let sk = SigningKey::generate(&mut rand::rngs::OsRng);
+    let pk = sk.verifying_key();
+    let pk_hex = hex::encode(pk.to_bytes());
+    // Register key
+    let body = serde_json::json!({"public_key_hex": pk_hex}).to_string();
+    let req_reg = Request::builder().method("POST").uri("/apps/verifapp/public-keys")
+        .header("content-type","application/json")
+        .body(Body::from(body)).unwrap();
+    let resp_reg = app.clone().oneshot(req_reg).await.unwrap();
+    assert_eq!(resp_reg.status(), StatusCode::CREATED);
+    // Prepare artifact
+    let data = b"verifiable-bytes".to_vec();
+    let mut h = Sha256::new(); h.update(&data); let dgst = format!("{:x}", h.finalize());
+    let sig: Signature = sk.sign(dgst.as_bytes());
+    let sig_hex = hex::encode(sig.to_bytes());
+    let (artifact_bytes, boundary) = multipart_body(vec![("app_name","verifapp")], Some(("artifact", data)));
+    let req = Request::builder().method("POST").uri("/artifacts")
+        .header("content-type", format!("multipart/form-data; boundary={}", boundary))
+        .header("x-aether-artifact-digest", dgst.clone())
+        .header("x-aether-signature", sig_hex)
+        .body(Body::from(artifact_bytes)).unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body_bytes = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(v["verified"], true);
+    // HEAD existence
+    let head_req = Request::builder().method("HEAD").uri(format!("/artifacts/{}", dgst)).body(Body::empty()).unwrap();
+    let head_resp = app.clone().oneshot(head_req).await.unwrap();
+    assert_eq!(head_resp.status(), StatusCode::OK);
 }
 
 #[tokio::test]

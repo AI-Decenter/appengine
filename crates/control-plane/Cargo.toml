@@ -24,8 +24,11 @@ prometheus = "0.14"
 axum-extra = { version = "0.9", features = ["typed-header"] }
 tower-http = { version = "0.5", features = ["limit", "trace", "cors"] }
 sha2 = "0.10"
+ed25519-dalek = { version = "2", features = ["std","rand_core"] }
+hex = "0.4"
 
 [dev-dependencies]
 proptest = "1"
 serial_test = "3"
+rand = "0.8"
 

@@ -7,7 +7,7 @@ pub mod telemetry;
 
 use axum::{Router, routing::{get, post}};
 use sqlx::{Pool, Postgres};
-use handlers::{health::health, apps::{list_apps, app_logs, create_app, app_deployments}, deployments::{create_deployment, list_deployments}, readiness::readiness, uploads::{upload_artifact, list_artifacts}};
+use handlers::{health::health, apps::{list_apps, app_logs, create_app, app_deployments, add_public_key}, deployments::{create_deployment, list_deployments}, readiness::readiness, uploads::{upload_artifact, list_artifacts, head_artifact}};
 use utoipa::OpenApi;
 use crate::telemetry::metrics_handler;
 use axum::response::Html;
@@ -28,6 +28,7 @@ pub struct AppState { pub db: Pool<Postgres> }
     handlers::deployments::list_deployments,
     handlers::uploads::upload_artifact,
     handlers::uploads::list_artifacts,
+    handlers::apps::add_public_key,
     ),
     components(schemas(error::ApiErrorBody)),
     tags( (name = "aether", description = "Aether Control Plane API") )
@@ -51,7 +52,17 @@ window.onload = () => { SwaggerUIBundle({ url: '/openapi.json', dom_id: '#swagge
 }
 
 pub fn build_router(state: AppState) -> Router {
-    let openapi = ApiDoc::openapi();
+    let mut openapi = ApiDoc::openapi();
+    // Inject security scheme manually (workaround for macro limitations)
+    if let Ok(mut value) = serde_json::to_value(&openapi) {
+        use serde_json::json;
+        value["components"]["securitySchemes"]["bearer_auth"] = json!({"type":"http","scheme":"bearer"});
+        value["security"] = json!([{"bearer_auth": []}]);
+        if let Ok(spec) = serde_json::from_value(value.clone()) { openapi = spec; }
+    }
+    // Initialize artifacts_total gauge asynchronously
+    let db_clone = state.db.clone();
+    tokio::spawn(async move { crate::handlers::uploads::init_artifacts_total(&db_clone).await; });
     Router::new()
         .route("/health", get(health))
     .route("/readyz", get(readiness))
@@ -59,11 +70,13 @@ pub fn build_router(state: AppState) -> Router {
         .route("/metrics", get(metrics_handler))
     .route("/deployments", post(create_deployment).get(list_deployments))
     .route("/artifacts", post(upload_artifact).get(list_artifacts))
+    .route("/artifacts/:digest", axum::routing::head(head_artifact))
         .route("/apps", post(create_app))
         .route("/apps", get(list_apps))
         .route("/apps/:app_name/deployments", get(app_deployments))
         .route("/apps/:app_name/logs", get(app_logs))
-        .route("/openapi.json", get(|| async move { axum::Json(openapi.clone()) }))
+        .route("/apps/:app_name/public-keys", post(add_public_key))
+    .route("/openapi.json", get(|| async move { axum::Json(openapi.clone()) }))
         .route("/swagger", get(swagger_ui))
         .with_state(state)
 }
