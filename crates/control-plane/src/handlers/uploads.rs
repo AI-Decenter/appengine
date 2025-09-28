@@ -3,6 +3,7 @@ use axum::http::{StatusCode, HeaderMap};
 use axum::response::IntoResponse;
 use serde::Deserialize;
 use uuid::Uuid;
+use sqlx::pool::PoolConnection;
 use crate::{AppState, error::ApiError, telemetry::REGISTRY, models::Artifact};
 // Import re-exported get_storage from crate root (avoids direct module path dependency)
 use crate::get_storage;
@@ -11,6 +12,10 @@ use std::{fs, path::PathBuf, io::Write, time::Instant};
 use tracing::{info,error,warn, span, Level};
 use sha2::{Sha256, Digest};
 use sqlx::Row;
+
+// Helper to obtain &mut PgConnection without inline &mut *conn pattern (avoids clippy explicit_auto_deref)
+#[inline]
+fn pg(conn: &mut PoolConnection<sqlx::Postgres>) -> &mut sqlx::PgConnection { &mut *conn }
 
 // Metrics & concurrency primitives (module-level)
 static ARTIFACT_UPLOAD_BYTES: once_cell::sync::Lazy<prometheus::IntCounter> = once_cell::sync::Lazy::new(|| {
@@ -215,12 +220,12 @@ pub async fn complete_artifact(State(state): State<AppState>, headers: HeaderMap
     // Resolve application id (optional link)
     let app_id: Option<uuid::Uuid> = sqlx::query_scalar("SELECT id FROM applications WHERE name=$1")
         .bind(&req.app_name)
-        .fetch_optional(&mut *conn).await.ok().flatten();
+    .fetch_optional(pg(&mut conn)).await.ok().flatten();
 
     // Check if artifact exists
     let existing = sqlx::query_as::<_, (Uuid,bool,Option<String>,String)>("SELECT id, verified, storage_key, status FROM artifacts WHERE digest=$1")
         .bind(&req.digest)
-        .fetch_optional(&mut *conn).await.ok().flatten();
+    .fetch_optional(pg(&mut conn)).await.ok().flatten();
     let require_presign = std::env::var("AETHER_REQUIRE_PRESIGN").ok().map(|v| v=="1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
     if require_presign && existing.is_none() {
         return ApiError::new(StatusCode::BAD_REQUEST, "presign_required", "presign step required before completion").into_response();
@@ -240,8 +245,10 @@ pub async fn complete_artifact(State(state): State<AppState>, headers: HeaderMap
         } else if status == "pending" {
             // Idempotency key conflict check: if provided and differs from existing row key (if any)
             if let Some(ref key) = req.idempotency_key {
-                if let Ok(Some(existing_key)) = sqlx::query_scalar::<_, Option<String>>("SELECT idempotency_key FROM artifacts WHERE id=$1").bind(id).fetch_optional(&mut *conn).await {
-                    if let Some(k)=existing_key { if k!=*key { return ApiError::new(StatusCode::CONFLICT, "idempotency_conflict", "different operation for same digest").into_response(); } }
+                if let Ok(Some(Some(k))) = sqlx::query_scalar::<_, Option<String>>("SELECT idempotency_key FROM artifacts WHERE id=$1")
+                    .bind(id)
+                    .fetch_optional(pg(&mut conn)).await {
+                    if k!=*key { return ApiError::new(StatusCode::CONFLICT, "idempotency_conflict", "different operation for same digest").into_response(); }
                 }
             }
             // Backfill app_id if missing to ensure quotas see previous stored artifacts
@@ -249,7 +256,7 @@ pub async fn complete_artifact(State(state): State<AppState>, headers: HeaderMap
                 let _ = sqlx::query("UPDATE artifacts SET app_id=$1 WHERE id=$2 AND app_id IS NULL")
                     .bind(app_uuid)
                     .bind(id)
-                    .execute(&mut *conn).await;
+                    .execute(pg(&mut conn)).await;
             }
             // Optional remote size verification if backend can provide it
             let _verified_remote = true; // placeholder for future remote verification logic extension
@@ -280,7 +287,7 @@ pub async fn complete_artifact(State(state): State<AppState>, headers: HeaderMap
             // Update pending record with final size and optional signature
             // Quota enforcement (if app scoped)
             if let Some(app_uuid) = app_id {
-                if let Err(resp) = enforce_quota(&mut *conn, app_uuid, req.size_bytes).await { return resp.into_response(); }
+                if let Err(resp) = enforce_quota(&mut conn, app_uuid, req.size_bytes).await { return resp.into_response(); }
             }
             let upd = sqlx::query("UPDATE artifacts SET app_id=$1, size_bytes=$2, signature=$3, verified=$4, storage_key=$5, status='stored', completed_at=NOW(), idempotency_key=COALESCE(idempotency_key,$7) WHERE id=$6 RETURNING verified, idempotency_key")
                 .bind(app_id)
@@ -290,13 +297,13 @@ pub async fn complete_artifact(State(state): State<AppState>, headers: HeaderMap
                 .bind(&key)
                 .bind(id)
                 .bind(&req.idempotency_key)
-                .fetch_one(&mut *conn).await;
+                .fetch_one(pg(&mut conn)).await;
             match upd {
                 Ok(r) => {
                     let final_verified: bool = r.get(0);
                     let idem: Option<String> = r.get(1);
-                    insert_event(&mut *conn, *id, "stored").await.ok();
-                    retention_gc_if_needed(&mut *conn, app_id).await.ok();
+                    insert_event(&mut conn, *id, "stored").await.ok();
+                    retention_gc_if_needed(&mut conn, app_id).await.ok();
                     if let Some(dh) = headers.get("X-Aether-Upload-Duration").and_then(|v| v.to_str().ok()) { if let Ok(vf)=dh.parse::<f64>() { ARTIFACT_PUT_DURATION.observe(vf); } }
                     return (StatusCode::OK, Json(CompleteResponse {
                         artifact_id: id.to_string(),
@@ -322,11 +329,11 @@ pub async fn complete_artifact(State(state): State<AppState>, headers: HeaderMap
             if let Ok(Some(app_uuid)) = sqlx::query_scalar::<_, uuid::Uuid>(
                 "SELECT id FROM applications WHERE name=$1")
                 .bind(&req.app_name)
-                .fetch_optional(&mut *conn).await {
+                .fetch_optional(pg(&mut conn)).await {
                 if let Ok(rows) = sqlx::query_scalar::<_, String>(
                     "SELECT public_key_hex FROM public_keys WHERE app_id=$1 AND active")
                     .bind(app_uuid)
-                    .fetch_all(&mut *conn).await {
+                    .fetch_all(pg(&mut conn)).await {
                     for pk_hex in rows {
                         if let (Ok(sig_bytes), Ok(pk_bytes)) = (hex::decode(sig_hex), hex::decode(&pk_hex)) {
                             if pk_bytes.len()==32 && sig_bytes.len()==64 {
@@ -348,8 +355,10 @@ pub async fn complete_artifact(State(state): State<AppState>, headers: HeaderMap
     // Insert metadata (status: stored)
     // Idempotency key uniqueness: if provided and maps to different digest -> conflict
             if let Some(ref key) = req.idempotency_key {
-                if let Ok(Some(existing_digest)) = sqlx::query_scalar::<_, Option<String>>("SELECT digest FROM artifacts WHERE idempotency_key=$1").bind(key).fetch_optional(&mut *conn).await {
-                    if let Some(d)=existing_digest { if d != req.digest { return ApiError::new(StatusCode::CONFLICT, "idempotency_conflict", "idempotency key already used").into_response(); } }
+                if let Ok(Some(Some(d))) = sqlx::query_scalar::<_, Option<String>>("SELECT digest FROM artifacts WHERE idempotency_key=$1")
+                    .bind(key)
+                    .fetch_optional(pg(&mut conn)).await {
+                    if d != req.digest { return ApiError::new(StatusCode::CONFLICT, "idempotency_conflict", "idempotency key already used").into_response(); }
                 }
             }
     if let Some(app_uuid) = app_id { if let Err(resp)=enforce_quota(&mut conn, app_uuid, req.size_bytes).await { return resp.into_response(); } }
@@ -361,7 +370,7 @@ pub async fn complete_artifact(State(state): State<AppState>, headers: HeaderMap
         .bind(verified) // $5 verified
         .bind(&key) // $6 storage_key
         .bind(&req.idempotency_key)
-        .fetch_one(&mut *conn).await;
+    .fetch_one(pg(&mut conn)).await;
 
     match ins {
         Ok(row) => {
@@ -370,8 +379,8 @@ pub async fn complete_artifact(State(state): State<AppState>, headers: HeaderMap
             ARTIFACTS_TOTAL.inc();
             COMPLETE_DURATION.observe(start.elapsed().as_secs_f64());
             if let Some(dh) = headers.get("X-Aether-Upload-Duration").and_then(|v| v.to_str().ok()) { if let Ok(vf)=dh.parse::<f64>() { ARTIFACT_PUT_DURATION.observe(vf); } }
-            insert_event(&mut *conn, id, "stored").await.ok();
-            retention_gc_if_needed(&mut *conn, app_id).await.ok();
+            insert_event(&mut conn, id, "stored").await.ok();
+            retention_gc_if_needed(&mut conn, app_id).await.ok();
             (StatusCode::OK, Json(CompleteResponse {
                 artifact_id: id.to_string(),
                 digest: req.digest,
@@ -458,7 +467,7 @@ pub async fn upload_artifact(State(state): State<AppState>, headers: HeaderMap, 
     let mut conn = match state.db.acquire().await { Ok(c)=>c, Err(e)=> { error!(?e, "acquire_conn"); return ApiError::internal("db").into_response(); } };
     if let Ok(row) = sqlx::query("SELECT id, app_id, verified FROM artifacts WHERE digest = $1")
         .bind(&computed)
-        .fetch_one(&mut *conn).await {
+    .fetch_one(pg(&mut conn)).await {
         let existing_id: Uuid = row.get(0);
         let existing_app_id: Option<Uuid> = row.get(1);
         let existing_verified: bool = row.get(2);
@@ -479,7 +488,7 @@ pub async fn upload_artifact(State(state): State<AppState>, headers: HeaderMap, 
     // Resolve app_id if app exists
     let app_id: Option<uuid::Uuid> = sqlx::query_scalar("SELECT id FROM applications WHERE name = $1")
         .bind(&app)
-        .fetch_optional(&mut *conn).await.ok().flatten();
+    .fetch_optional(pg(&mut conn)).await.ok().flatten();
     // Attempt signature verification using DB stored public keys (active)
     let mut verified = false;
     if let Some(sig_hex) = signature.as_ref() {
@@ -488,10 +497,10 @@ pub async fn upload_artifact(State(state): State<AppState>, headers: HeaderMap, 
             let _e = span_verify.enter();
             if let Ok(Some(app_uuid)) = sqlx::query_scalar::<_, uuid::Uuid>("SELECT id FROM applications WHERE name=$1")
                 .bind(&app)
-                .fetch_optional(&mut *conn).await {
+                .fetch_optional(pg(&mut conn)).await {
                 if let Ok(rows) = sqlx::query_scalar::<_, String>("SELECT public_key_hex FROM public_keys WHERE app_id=$1 AND active")
                     .bind(app_uuid)
-                    .fetch_all(&mut *conn).await {
+                    .fetch_all(pg(&mut conn)).await {
                     for pk_hex in rows {
                         if let (Ok(sig_bytes), Ok(pk_bytes)) = (hex::decode(sig_hex), hex::decode(&pk_hex)) {
                             if pk_bytes.len()==32 && sig_bytes.len()==64 {
@@ -514,7 +523,7 @@ pub async fn upload_artifact(State(state): State<AppState>, headers: HeaderMap, 
         .bind(size)
         .bind(signature.as_ref())
         .bind(verified)
-        .fetch_one(&mut *conn).await;
+    .fetch_one(pg(&mut conn)).await;
     match rec {
         Ok(row)=> {
             let id: Uuid = row.get::<Uuid, _>(0);
@@ -566,31 +575,31 @@ pub async fn artifact_meta(State(state): State<AppState>, Path(digest): Path<Str
 }
 
 /// Insert artifact event (best-effort)
-async fn insert_event(conn: &mut sqlx::PgConnection, artifact_id: Uuid, event_type: &str) -> anyhow::Result<()> {
+async fn insert_event(conn: &mut PoolConnection<sqlx::Postgres>, artifact_id: Uuid, event_type: &str) -> anyhow::Result<()> {
     let _ = sqlx::query("INSERT INTO artifact_events (artifact_id, event_type) VALUES ($1,$2)")
         .bind(artifact_id)
         .bind(event_type)
-        .execute(conn).await;
+        .execute(pg(conn)).await;
     ARTIFACT_EVENTS_TOTAL.inc();
     Ok(())
 }
 
 /// Enforce per-app quotas if configured
-async fn enforce_quota(conn: &mut sqlx::PgConnection, app_id: Uuid, incoming_size: i64) -> Result<(), ApiError> {
+async fn enforce_quota(conn: &mut PoolConnection<sqlx::Postgres>, app_id: Uuid, incoming_size: i64) -> Result<(), ApiError> {
     let max_count = std::env::var("AETHER_MAX_ARTIFACTS_PER_APP").ok().and_then(|v| v.parse::<i64>().ok()).filter(|v| *v>0);
     let max_bytes = std::env::var("AETHER_MAX_TOTAL_BYTES_PER_APP").ok().and_then(|v| v.parse::<i64>().ok()).filter(|v| *v>0);
     if max_count.is_none() && max_bytes.is_none() { return Ok(()); }
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM artifacts WHERE app_id=$1 AND status!='pending'")
-        .bind(app_id).fetch_one(&mut *conn).await.unwrap_or(0);
+        .bind(app_id).fetch_one(pg(conn)).await.unwrap_or(0);
     let used_bytes: i64 = sqlx::query_scalar("SELECT COALESCE(SUM(size_bytes),0) FROM artifacts WHERE app_id=$1 AND status!='pending'")
-        .bind(app_id).fetch_one(&mut *conn).await.unwrap_or(0);
+        .bind(app_id).fetch_one(pg(conn)).await.unwrap_or(0);
     if let Some(mc)=max_count { if count >= mc { QUOTA_EXCEEDED_TOTAL.inc(); return Err(ApiError::new(StatusCode::FORBIDDEN, "quota_exceeded", format!("artifact count quota {} reached", mc))); } }
     if let Some(mb)=max_bytes { if used_bytes + incoming_size > mb { QUOTA_EXCEEDED_TOTAL.inc(); return Err(ApiError::new(StatusCode::FORBIDDEN, "quota_exceeded", format!("size quota {} exceeded ({} + {})", mb, used_bytes, incoming_size))); } }
     Ok(())
 }
 
 /// Retention GC: keep only latest N per app if configured (order by created_at desc)
-async fn retention_gc_if_needed(conn: &mut sqlx::PgConnection, app_id: Option<Uuid>) -> anyhow::Result<()> {
+async fn retention_gc_if_needed(conn: &mut PoolConnection<sqlx::Postgres>, app_id: Option<Uuid>) -> anyhow::Result<()> {
     let Some(app) = app_id else { return Ok(()); };
     let retain = std::env::var("AETHER_RETAIN_LATEST_PER_APP").ok().and_then(|v| v.parse::<i64>().ok()).filter(|v| *v>0).unwrap_or(0);
     if retain == 0 { return Ok(()); }
@@ -599,10 +608,10 @@ async fn retention_gc_if_needed(conn: &mut sqlx::PgConnection, app_id: Option<Uu
         "SELECT id FROM artifacts WHERE app_id=$1 AND status='stored' ORDER BY created_at DESC OFFSET $2")
         .bind(app)
         .bind(retain)
-        .fetch_all(&mut *conn).await.unwrap_or_default();
+    .fetch_all(pg(conn)).await.unwrap_or_default();
     if !obsolete.is_empty() {
-        for id in &obsolete { insert_event(&mut *conn, *id, "retention_delete").await.ok(); }
-    let _ = sqlx::query("DELETE FROM artifacts WHERE id = ANY($1)").bind(&obsolete).execute(&mut *conn).await;
+        for id in &obsolete { insert_event(conn, *id, "retention_delete").await.ok(); }
+    let _ = sqlx::query("DELETE FROM artifacts WHERE id = ANY($1)").bind(&obsolete).execute(pg(conn)).await;
     }
     Ok(())
 }
@@ -633,12 +642,12 @@ pub async fn multipart_init(State(state): State<AppState>, Json(req): Json<Multi
     let key = format!("artifacts/{}/{}/app.tar.gz", req.app_name, req.digest);
     // Ensure pending row exists (if already stored, shortcut)
     if let Ok(Some(status)) = sqlx::query_scalar::<_, String>("SELECT status FROM artifacts WHERE digest=$1")
-        .bind(&req.digest).fetch_optional(&mut *conn).await { if status=="stored" { return ApiError::new(StatusCode::CONFLICT, "already_stored", "artifact already stored").into_response(); } }
+    .bind(&req.digest).fetch_optional(pg(&mut conn)).await { if status=="stored" { return ApiError::new(StatusCode::CONFLICT, "already_stored", "artifact already stored").into_response(); } }
     let storage = get_storage().await;
     match storage.backend().init_multipart(&key, &req.digest).await {
         Ok(upload_id)=> {
             let _ = sqlx::query("INSERT INTO artifacts (app_id,digest,size_bytes,signature,sbom_url,manifest_url,verified,storage_key,status,multipart_upload_id) VALUES (NULL,$1,0,NULL,NULL,NULL,FALSE,$2,'pending',$3) ON CONFLICT (digest) DO UPDATE SET multipart_upload_id=EXCLUDED.multipart_upload_id, storage_key=EXCLUDED.storage_key")
-                .bind(&req.digest).bind(&key).bind(&upload_id).execute(&mut *conn).await;
+                .bind(&req.digest).bind(&key).bind(&upload_id).execute(pg(&mut conn)).await;
             MULTIPART_INITS_TOTAL.inc();
             (StatusCode::OK, Json(MultipartInitResponse { upload_id, storage_key: key })).into_response()
         }
@@ -668,13 +677,13 @@ pub async fn multipart_presign_part(State(state): State<AppState>, Json(req): Js
     if req.part_number <=0 { return ApiError::bad_request("part_number must be >0").into_response(); }
     let mut conn = match state.db.acquire().await { Ok(c)=>c, Err(_)=> return ApiError::internal("db").into_response() };
     let row = sqlx::query_as::<_, (String, Option<String>, Option<String>)>("SELECT status, storage_key, multipart_upload_id FROM artifacts WHERE digest=$1")
-        .bind(&req.digest).fetch_optional(&mut *conn).await.ok().flatten();
+    .bind(&req.digest).fetch_optional(pg(&mut conn)).await.ok().flatten();
     let Some((status, sk_opt, upload_id_opt)) = row else { return ApiError::new(StatusCode::BAD_REQUEST, "unknown_digest", "digest not initialized").into_response(); };
     if status=="stored" { return ApiError::new(StatusCode::CONFLICT, "already_stored", "artifact already stored").into_response(); }
     let Some(storage_key) = sk_opt else { return ApiError::internal("missing storage_key").into_response(); };
     if upload_id_opt.as_deref()!=Some(&req.upload_id) { return ApiError::new(StatusCode::BAD_REQUEST, "upload_id_mismatch", "upload id mismatch").into_response(); }
     let storage = get_storage().await;
-    match storage.backend().presign_multipart_part(&storage_key, &req.upload_id, req.part_number as i32).await {
+    match storage.backend().presign_multipart_part(&storage_key, &req.upload_id, req.part_number).await {
         Ok(p)=> { MULTIPART_PART_PRESIGNS_TOTAL.inc(); (StatusCode::OK, Json(MultipartPresignPartResponse { url: p.url, method: p.method, headers: p.headers })).into_response() },
         Err(_)=> ApiError::new(StatusCode::NOT_IMPLEMENTED, "multipart_unsupported", "multipart not supported by backend").into_response()
     }
@@ -707,13 +716,13 @@ pub async fn multipart_complete(State(state): State<AppState>, Json(req): Json<M
     if req.size_bytes < 0 { return ApiError::bad_request("size_bytes must be >=0").into_response(); }
     let mut conn = match state.db.acquire().await { Ok(c)=>c, Err(_)=> return ApiError::internal("db").into_response() };
     let row = sqlx::query_as::<_, (Uuid,String,Option<String>,Option<String>)>("SELECT id,status,storage_key,multipart_upload_id FROM artifacts WHERE digest=$1")
-        .bind(&req.digest).fetch_optional(&mut *conn).await.ok().flatten();
+    .bind(&req.digest).fetch_optional(pg(&mut conn)).await.ok().flatten();
     let Some((id,status,sk_opt,upload_id_opt)) = row else { return ApiError::new(StatusCode::BAD_REQUEST, "unknown_digest", "digest not initialized").into_response(); };
     if status=="stored" { return (StatusCode::OK, Json(MultipartCompleteResponse { status: "stored".into(), storage_key: sk_opt.unwrap_or_default(), digest: req.digest })).into_response(); }
     let Some(storage_key) = sk_opt else { return ApiError::internal("missing storage_key").into_response(); };
     if upload_id_opt.as_deref()!=Some(&req.upload_id) { return ApiError::new(StatusCode::BAD_REQUEST, "upload_id_mismatch", "upload id mismatch").into_response(); }
     let storage = get_storage().await;
-    if let Err(_)=storage.backend().complete_multipart(&storage_key, &req.upload_id, req.parts.iter().map(|p| (p.part_number, p.etag.clone())).collect()).await { MULTIPART_COMPLETE_FAILURES_TOTAL.inc(); return ApiError::new(StatusCode::NOT_IMPLEMENTED, "multipart_unsupported", "multipart not supported by backend").into_response(); }
+    if storage.backend().complete_multipart(&storage_key, &req.upload_id, req.parts.iter().map(|p| (p.part_number, p.etag.clone())).collect()).await.is_err() { MULTIPART_COMPLETE_FAILURES_TOTAL.inc(); return ApiError::new(StatusCode::NOT_IMPLEMENTED, "multipart_unsupported", "multipart not supported by backend").into_response(); }
     // Observe parts metrics (counts + (approx) size per part if size_bytes set). We approximate uniform part size except possibly last part.
     if !req.parts.is_empty() {
         MULTIPART_PARTS_PER_ARTIFACT.observe(req.parts.len() as f64);
@@ -731,7 +740,7 @@ pub async fn multipart_complete(State(state): State<AppState>, Json(req): Json<M
     }
     // finalize DB row similar to complete_artifact pending branch
     let app_id: Option<uuid::Uuid> = sqlx::query_scalar("SELECT id FROM applications WHERE name=$1")
-        .bind(&req.app_name).fetch_optional(&mut *conn).await.ok().flatten();
+    .bind(&req.app_name).fetch_optional(pg(&mut conn)).await.ok().flatten();
     if let Some(app_uuid)=app_id { if let Err(resp)=enforce_quota(&mut conn, app_uuid, req.size_bytes).await { return resp.into_response(); } }
     let upd = sqlx::query("UPDATE artifacts SET app_id=$1,size_bytes=$2, signature=$3, verified=FALSE, status='stored', completed_at=NOW(), idempotency_key=COALESCE(idempotency_key,$5) WHERE id=$4 RETURNING id")
         .bind(app_id)
@@ -739,7 +748,7 @@ pub async fn multipart_complete(State(state): State<AppState>, Json(req): Json<M
         .bind(req.signature.as_ref())
         .bind(id)
         .bind(&req.idempotency_key)
-        .fetch_one(&mut *conn).await;
+    .fetch_one(pg(&mut conn)).await;
     match upd { Ok(_)=> { MULTIPART_COMPLETES_TOTAL.inc(); insert_event(&mut conn, id, "stored").await.ok(); retention_gc_if_needed(&mut conn, app_id).await.ok(); (StatusCode::OK, Json(MultipartCompleteResponse { status: "stored".into(), storage_key, digest: req.digest })).into_response() }, Err(e)=> { MULTIPART_COMPLETE_FAILURES_TOTAL.inc(); error!(?e, "multipart_complete_update_failed"); ApiError::internal("db update").into_response() } }
 }
 
