@@ -399,7 +399,7 @@ async fn two_phase_upload(artifact:&Path, root:&Path, base:&str, digest:&str, si
             // We build a streaming body manually updating progress
             let stream = async_stream::stream! {
                 loop {
-                    match file.read(&mut buf).await { Ok(0) => break, Ok(n) => { sent += n as u64; if let Some(pb)=&pb { pb.set_position(sent); } yield Ok::<_, std::io::Error>(bytes::Bytes::copy_from_slice(&buf[..n])); }, Err(e)=> { break; } }
+                    match file.read(&mut buf).await { Ok(0) => break, Ok(n) => { sent += n as u64; if let Some(pb)=&pb { pb.set_position(sent); } yield Ok::<_, std::io::Error>(bytes::Bytes::copy_from_slice(&buf[..n])); }, Err(_e)=> { break; } }
                 }
                 if let Some(pb)=&pb { pb.finish_and_clear(); }
             };

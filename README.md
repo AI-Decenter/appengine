@@ -230,6 +230,105 @@ Uploads are limited by a semaphore (env: `AETHER_MAX_CONCURRENT_UPLOADS`, defaul
 ### 4.7 Security Scheme
 Bearer token auth (`Authorization: Bearer <token>`) configured via `AETHER_API_TOKENS` (CSV) or fallback `AETHER_API_TOKEN`. OpenAPI spec exposes a `bearer_auth` security scheme applied globally.
 
+### 4.8 Extended Artifact Upload (Two-Phase + Multipart)
+
+Two-phase single-part flow:
+1. `POST /artifacts/presign` – obtain presigned PUT (or method NONE if duplicate already stored)
+2. Client performs PUT directly to object storage (S3 / MinIO) using returned headers
+3. `POST /artifacts/complete` – finalize (size & optional remote hash verification, quota + retention enforcement, idempotency)
+
+Multipart flow (large artifacts) adds:
+1. `POST /artifacts/multipart/init` – returns `upload_id` + `storage_key`
+2. Loop: `POST /artifacts/multipart/presign-part` – presign each part (client uploads via PUT)
+3. `POST /artifacts/multipart/complete` – supply list of `(part_number, etag)` pairs, finalize record
+
+Idempotency: supply `idempotency_key` on complete endpoints; conflicting reuse across different digests is rejected with `409 idempotency_conflict`.
+
+Quota Enforcement: configurable per-app limits on artifact count and cumulative bytes. Rejections return `403 quota_exceeded`.
+
+Retention Policy: keep latest N stored artifacts per app; older rows deleted post-store (retention events emitted).
+
+Server-Side Encryption (S3): set `AETHER_S3_SSE` to `AES256` or `aws:kms` (optionally `AETHER_S3_SSE_KMS_KEY`).
+
+Remote Verification Toggles:
+* Size: `AETHER_VERIFY_REMOTE_SIZE` (default on)
+* Metadata digest: `AETHER_VERIFY_REMOTE_DIGEST` (default on)
+* Full hash (small objects only): `AETHER_VERIFY_REMOTE_HASH` + `AETHER_REMOTE_HASH_MAX_BYTES`
+
+### 4.9 Prometheus Metrics (Extended)
+
+Existing (core) metrics plus newly added artifact lifecycle instrumentation:
+
+Counters:
+* `artifact_presign_requests_total` – presign attempts
+* `artifact_presign_failures_total` – presign errors (backend/head failures)
+* `artifact_complete_failures_total` – completion DB / logic errors
+* `artifact_upload_bytes_total` – bytes of legacy (deprecated) direct uploads
+* `artifact_digest_mismatch_total` – remote metadata/hash mismatches
+* `artifact_size_exceeded_total` – rejected for per-object size limit
+* `artifact_pending_gc_runs_total` / `artifact_pending_gc_deleted_total` – stale pending cleanup
+* `artifact_events_total` – audit events written
+* `artifact_legacy_upload_requests_total` – deprecated `/artifacts` hits
+* `artifact_multipart_inits_total` – multipart session starts
+* `artifact_multipart_part_presigns_total` – part presign calls
+* `artifact_multipart_completes_total` – successful multipart completes
+* `artifact_multipart_complete_failures_total` – multipart completion failures
+* `artifact_quota_exceeded_total` – quota rejections
+
+Gauges:
+* `artifact_uploads_in_progress` – active legacy direct uploads
+* `artifacts_total` – stored artifact rows (adjusted on insert/init)
+
+Histograms:
+* `artifact_upload_duration_seconds` – legacy direct upload wall time
+* `artifact_put_duration_seconds` – client-reported PUT transfer duration (two-phase + multipart)
+* `artifact_complete_duration_seconds` – server-side complete handler time
+* `artifact_multipart_part_size_bytes` – distribution of part sizes (approximate; estimated at completion)
+* `artifact_multipart_parts_per_artifact` – distribution of part counts per multipart artifact
+
+Cardinality Guidance: all metrics intentionally have zero or minimal label cardinality (no per-app labels) to remain low cost at scale; future segmentation (e.g. per-app) would use dynamic metric families + allow lists.
+
+### 4.10 Environment Variables (Artifact & Storage Subsystem)
+
+Core limits & behavior:
+* `AETHER_MAX_ARTIFACT_SIZE_BYTES` – reject complete if reported size exceeds (0=disabled)
+* `AETHER_MAX_CONCURRENT_UPLOADS` – semaphore permits for legacy endpoint (default 32)
+* `AETHER_PRESIGN_EXPIRE_SECS` – expiry for presigned URLs (default 900)
+* `AETHER_REQUIRE_PRESIGN` – force presign before complete (`true|1`)
+
+Quotas & retention:
+* `AETHER_MAX_ARTIFACTS_PER_APP` – limit count per app (0/absent disables)
+* `AETHER_MAX_TOTAL_BYTES_PER_APP` – cumulative byte quota per app
+* `AETHER_RETAIN_LATEST_PER_APP` – keep N newest stored artifacts; delete older
+
+Remote verification:
+* `AETHER_VERIFY_REMOTE_SIZE` – enable size HEAD check (default true)
+* `AETHER_VERIFY_REMOTE_DIGEST` – validate remote metadata sha256
+* `AETHER_VERIFY_REMOTE_HASH` – fetch full object (<= `AETHER_REMOTE_HASH_MAX_BYTES`) and hash
+* `AETHER_REMOTE_HASH_MAX_BYTES` – cap for remote hash download (default 8,000,000)
+
+Multipart thresholds:
+* `AETHER_MULTIPART_THRESHOLD_BYTES` – client selects multipart if artifact size >= threshold
+* `AETHER_MULTIPART_PART_SIZE_BYTES` – desired part size (client buffer; default 8 MiB)
+
+Storage/S3:
+* `AETHER_STORAGE_MODE` – `mock` or `s3`
+* `AETHER_ARTIFACT_BUCKET` – S3 bucket name (default `artifacts`)
+* `AETHER_S3_BASE_URL` – mock base URL (for mock backend only)
+* `AETHER_S3_ENDPOINT_URL` – custom S3 endpoint (MinIO / alternative)
+* `AETHER_S3_SSE` – `AES256` | `aws:kms` (enables SSE)
+* `AETHER_S3_SSE_KMS_KEY` – KMS key id/arn when using `aws:kms`
+
+Pending GC:
+* `AETHER_PENDING_TTL_SECS` – external GC driver: delete pending older than TTL (used by helper `run_pending_gc`)
+* `AETHER_PENDING_GC_INTERVAL_SECS` – operator side scheduling hint (not yet wired)
+
+Client / CLI related:
+* `AETHER_MAX_CONCURRENT_UPLOADS` – legacy path concurrency limit
+* `AETHER_API_BASE` – base URL used by CLI for API calls
+
+All boolean style env vars treat `true|1` (case-insensitive) as enabled.
+
 ---
 
 ## 5. Artifact Registry

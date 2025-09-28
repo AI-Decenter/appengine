@@ -89,6 +89,20 @@ static MULTIPART_COMPLETE_FAILURES_TOTAL: once_cell::sync::Lazy<prometheus::IntC
     let c = prometheus::IntCounter::new("artifact_multipart_complete_failures_total", "Total multipart completion failures").unwrap();
     REGISTRY.register(Box::new(c.clone())).ok(); c
 });
+// Histogram for individual multipart part sizes (bytes) observed at complete time.
+static MULTIPART_PART_SIZE_HIST: once_cell::sync::Lazy<prometheus::Histogram> = once_cell::sync::Lazy::new(|| {
+    let opts = prometheus::HistogramOpts::new("artifact_multipart_part_size_bytes", "Size distribution of multipart parts (bytes)")
+        .buckets(vec![256_000.0, 512_000.0, 1_000_000.0, 2_000_000.0, 4_000_000.0, 8_000_000.0, 16_000_000.0, 32_000_000.0, 64_000_000.0]);
+    let h = prometheus::Histogram::with_opts(opts).unwrap();
+    REGISTRY.register(Box::new(h.clone())).ok(); h
+});
+// Histogram for number of parts per multipart artifact.
+static MULTIPART_PARTS_PER_ARTIFACT: once_cell::sync::Lazy<prometheus::Histogram> = once_cell::sync::Lazy::new(|| {
+    let opts = prometheus::HistogramOpts::new("artifact_multipart_parts_per_artifact", "Distribution of multipart part counts per artifact")
+        .buckets(vec![1.0, 2.0, 3.0, 4.0, 6.0, 8.0, 12.0, 16.0, 24.0, 32.0, 48.0, 64.0]);
+    let h = prometheus::Histogram::with_opts(opts).unwrap();
+    REGISTRY.register(Box::new(h.clone())).ok(); h
+});
 static QUOTA_EXCEEDED_TOTAL: once_cell::sync::Lazy<prometheus::IntCounter> = once_cell::sync::Lazy::new(|| {
     let c = prometheus::IntCounter::new("artifact_quota_exceeded_total", "Total quota enforcement rejections").unwrap();
     REGISTRY.register(Box::new(c.clone())).ok(); c
@@ -700,6 +714,21 @@ pub async fn multipart_complete(State(state): State<AppState>, Json(req): Json<M
     if upload_id_opt.as_deref()!=Some(&req.upload_id) { return ApiError::new(StatusCode::BAD_REQUEST, "upload_id_mismatch", "upload id mismatch").into_response(); }
     let storage = get_storage().await;
     if let Err(_)=storage.backend().complete_multipart(&storage_key, &req.upload_id, req.parts.iter().map(|p| (p.part_number, p.etag.clone())).collect()).await { MULTIPART_COMPLETE_FAILURES_TOTAL.inc(); return ApiError::new(StatusCode::NOT_IMPLEMENTED, "multipart_unsupported", "multipart not supported by backend").into_response(); }
+    // Observe parts metrics (counts + (approx) size per part if size_bytes set). We approximate uniform part size except possibly last part.
+    if !req.parts.is_empty() {
+        MULTIPART_PARTS_PER_ARTIFACT.observe(req.parts.len() as f64);
+        if req.size_bytes > 0 {
+            let full_parts = req.parts.len();
+            let avg_part = (req.size_bytes / full_parts as i64).max(1);
+            for (idx, _p) in req.parts.iter().enumerate() {
+                let size_est = if idx == full_parts - 1 { // last part may have remainder
+                    let consumed = avg_part * (full_parts as i64 - 1);
+                    (req.size_bytes - consumed).max(0)
+                } else { avg_part };
+                MULTIPART_PART_SIZE_HIST.observe(size_est as f64);
+            }
+        }
+    }
     // finalize DB row similar to complete_artifact pending branch
     let app_id: Option<uuid::Uuid> = sqlx::query_scalar("SELECT id FROM applications WHERE name=$1")
         .bind(&req.app_name).fetch_optional(&mut *conn).await.ok().flatten();
