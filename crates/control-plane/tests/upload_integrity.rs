@@ -286,3 +286,62 @@ async fn presign_creates_pending_and_head_not_found_until_complete() {
     let head2_resp = app.clone().oneshot(head2).await.unwrap();
     assert_eq!(head2_resp.status(), StatusCode::OK);
 }
+
+#[tokio::test]
+#[serial_test::serial]
+async fn complete_requires_presign_when_flag_enabled() {
+    // Enable enforcement
+    let prev = std::env::var("AETHER_REQUIRE_PRESIGN").ok();
+    std::env::set_var("AETHER_REQUIRE_PRESIGN", "1");
+    let pool = pool().await; ensure_schema(&pool).await;
+    sqlx::query("DELETE FROM artifacts").execute(&pool).await.ok();
+    let app = build_router(AppState { db: pool.clone() });
+    let digest = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string();
+    // Attempt complete without presign
+    let body = serde_json::json!({"app_name":"enforceapp","digest":digest,"size_bytes":10,"signature":null}).to_string();
+    let req = Request::builder().method("POST").uri("/artifacts/complete")
+        .header("content-type","application/json")
+        .body(Body::from(body)).unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let bytes = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(v["code"], "presign_required");
+    // Now presign then complete
+    let presign_body = serde_json::json!({"app_name":"enforceapp","digest":digest}).to_string();
+    let preq = Request::builder().method("POST").uri("/artifacts/presign")
+        .header("content-type","application/json")
+        .body(Body::from(presign_body)).unwrap();
+    let presign_resp = app.clone().oneshot(preq).await.unwrap();
+    assert_eq!(presign_resp.status(), StatusCode::OK);
+    let comp_body = serde_json::json!({"app_name":"enforceapp","digest":digest,"size_bytes":10,"signature":null}).to_string();
+    let comp_req = Request::builder().method("POST").uri("/artifacts/complete")
+        .header("content-type","application/json")
+        .body(Body::from(comp_body)).unwrap();
+    let comp_resp = app.clone().oneshot(comp_req).await.unwrap();
+    assert_eq!(comp_resp.status(), StatusCode::OK);
+    // restore env
+    if let Some(v)=prev { std::env::set_var("AETHER_REQUIRE_PRESIGN", v); } else { std::env::remove_var("AETHER_REQUIRE_PRESIGN"); }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn pending_gc_deletes_old_rows() {
+    let pool = pool().await; ensure_schema(&pool).await;
+    sqlx::query("DELETE FROM artifacts").execute(&pool).await.ok();
+    // Insert artificially old pending row
+    let digest = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    let key = "artifacts/test/app.tar.gz";
+    sqlx::query("INSERT INTO artifacts (app_id,digest,size_bytes,signature,sbom_url,manifest_url,verified,storage_key,status,created_at) VALUES (NULL,$1,0,NULL,NULL,NULL,FALSE,$2,'pending', NOW() - INTERVAL '7200 seconds')")
+        .bind(digest)
+        .bind(key)
+        .execute(&pool).await.unwrap();
+    // Force adjust created_at in case default timing interferes
+    sqlx::query("UPDATE artifacts SET created_at = NOW() - INTERVAL '7200 seconds' WHERE digest=$1")
+        .bind(digest)
+        .execute(&pool).await.ok();
+    let deleted = control_plane::handlers::uploads::run_pending_gc(&pool, 3600).await.unwrap();
+    assert_eq!(deleted, 1, "expected one pending row to be deleted");
+    let remain: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM artifacts WHERE status='pending'").fetch_one(&pool).await.unwrap();
+    assert_eq!(remain, 0);
+}
