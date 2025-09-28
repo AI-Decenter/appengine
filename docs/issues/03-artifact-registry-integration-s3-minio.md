@@ -25,8 +25,8 @@ Checklist (✅ = done, ⏳ = in progress, 🔜 = planned)
 | Max artifact size enforcement | ✅ | Env `AETHER_MAX_ARTIFACT_SIZE_BYTES` |
 | Digest mismatch metric | ✅ | `artifact_digest_mismatch_total` |
 | Retry S3 HEAD/GET | ✅ | 3 attempts w/ backoff |
-| CLI tích hợp presign/complete | ⏳ | Chưa chuyển CLI, vẫn dùng upload cũ |
-| Thay thế hẳn upload multipart trực tiếp | 🔜 | Deprecate sau khi CLI đổi |
+| CLI tích hợp presign/complete | ✅ | CLI mặc định dùng two-phase; flag `--legacy-upload` để fallback |
+| Thay thế hẳn upload multipart trực tiếp | ⏳ | Endpoint còn tồn tại (sẽ deprecate sau cảnh báo nhiều phiên bản) |
 
 ## 3. Acceptance
 | ID | Điều kiện | Kết quả | Trạng thái |
@@ -47,7 +47,7 @@ Thiếu / cần thêm (follow-up):
 * PUT thực tế (integration với MinIO) – ĐÃ có test S3 (skips nếu không bật env) ✅
 * Negative: complete khi chưa presign – đã hỗ trợ flag bắt buộc (`AETHER_REQUIRE_PRESIGN`) ✅
 * Negative: presign digest không hợp lệ – validation hiện có ✅
-* Remote hash verify path chưa test riêng (follow-up) ⏳
+* Remote hash verify path chưa test riêng (follow-up) ✅ Test `s3_presign_complete_with_remote_hash` (MinIO gated)
 
 ## 5. Thiết kế trạng thái
 `pending` – tạo lúc presign, `size_bytes=0`, chưa có chữ ký.
@@ -75,7 +75,7 @@ HEAD chỉ phản ánh `stored` giúp client phân biệt upload chưa finalize.
 | E1 | AWS / MinIO real presign (SDK hoặc chữ ký V4 thủ công) | High |
 | E2 | TTL + GC bản ghi `pending` quá hạn | Medium |
 | E3 | Validate kích thước object (HEAD / stat) so với `size_bytes` | ✅ (S3 HEAD) |
-| E4 | Optional server SHA256 re-hash bằng streaming từ remote (small objects) | ⏳ (threshold-based) |
+| E4 | Optional server SHA256 re-hash bằng streaming từ remote (small objects) | ✅ (threshold-based + test) |
 ## 13. Env mới / cập nhật
 ```
 AETHER_MAX_ARTIFACT_SIZE_BYTES=52428800          # Giới hạn kích thước (ví dụ 50MB)
@@ -128,14 +128,20 @@ AETHER_PRESIGN_EXPIRE_SECONDS=900
 Core flow (mock) HOÀN THÀNH – chuyển sang giai đoạn triển khai presign thực và CLI migration.
 
 ## 12. Next Steps Actionable
-1. E1: Tích hợp AWS SDK (hoặc rusoto/minio client) tạo URL có expiry.
-2. E3: HEAD object validate size & optional digest.
-3. E7: Bật flag cấu hình `AETHER_REQUIRE_PRESIGN` để ép buộc quy trình.
-4. CLI refactor: `aether deploy` → presign + streaming PUT + complete.
-5. E15: Tạo trait `StorageBackend` + implementation `S3Backend` & `MockBackend`.
-6. Bổ sung test MinIO thực (docker service) cho CI optional stage.
+1. Deprecation plan: thêm header `Deprecation: true` & log cảnh báo cho endpoint legacy `/artifacts` (multipart) trước khi gỡ bỏ.
+2. Large-object path: thiết kế multi-part upload (> threshold) với resume & etag combine.
+3. Quota / rate-limit per app (số artifact & tổng dung lượng) + metrics.
+4. Retention policies (giữ N bản mới nhất mỗi app, TTL tuỳ chọn) + background GC.
+5. HEAD rich metadata: trả JSON (size, verified, created_at) thay vì 200 rỗng (introduce new endpoint `/artifacts/:digest/meta`).
+6. Webhook/event emit khi artifact chuyển `stored` (kết nối message bus internal).
+7. SSE encryption flags (SSE-S3 / SSE-KMS) qua env + propagate vào presign headers.
+8. Idempotency key cho complete để tránh double-update racing clients.
+9. Audit trail: bảng `artifact_events` (status transitions, actor, timestamp, signature validity).
+10. CLI: hiển thị tiến độ upload (progress bar) và cảnh báo nếu fallback legacy flag dùng.
+11. Observability: histogram `artifact_upload_put_duration_seconds` đo latency PUT (client đo & optionally gửi). 
+12. Error taxonomy: mã lỗi chuẩn hoá (size_mismatch, digest_mismatch_remote_hash) documented trong OpenAPI.
 
 ---
-Updated: 2025-09-27
+Updated: 2025-09-28
 
 ````

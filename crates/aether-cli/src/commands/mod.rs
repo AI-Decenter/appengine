@@ -47,6 +47,8 @@ pub enum Commands {
         #[arg(long, default_value_t = false)] no_sbom: bool,
         /// Định dạng output: text|json (json in ra metadata artifact)
         #[arg(long, default_value = "text")] format: Option<String>,
+        /// Dùng lộ trình upload legacy multipart (fallback). Mặc định tắt: CLI sẽ lỗi nếu two-phase thất bại.
+    #[arg(long, default_value_t = false)] legacy_upload: bool,
     },
     /// Mock hiển thị log gần nhất
     Logs { #[arg(long)] app: Option<String> },
