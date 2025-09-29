@@ -58,6 +58,9 @@ fn build_deployment_manifest(app: &str, digest: &str, artifact_url: &str, namesp
     // Containers differ if dev_hot enabled: add fetcher sidecar polling pod annotations for new digest
     let (init_containers, containers) = if dev_hot {
                 let fetch_script = r#"set -euo pipefail
+# Standardized dev-hot log markers for external metrics tailing:
+# REFRESH_OK app=<pod> digest=<digest>
+# REFRESH_FAIL app=<pod> reason=<reason>
 API="https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}"
 TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
 NS=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace)
@@ -78,12 +81,12 @@ while true; do
             if echo "$DIGEST  /workspace/app.tar.gz" | sha256sum -c - >/dev/null 2>&1; then
                 tar -xzf /workspace/app.tar.gz -C /workspace || { echo "[fetcher] extract failed"; sleep "$INTERVAL"; continue; }
                 CUR="$DIGEST"
-                echo "[fetcher] updated to $DIGEST"
+                echo "[fetcher] updated to $DIGEST"; echo "REFRESH_OK app=$POD digest=$DIGEST"
             else
-                echo "[fetcher] checksum mismatch for $ART (expected $DIGEST)";
+                echo "[fetcher] checksum mismatch for $ART (expected $DIGEST)"; echo "REFRESH_FAIL app=$POD reason=checksum";
             fi
         else
-            echo "[fetcher] download failed for $ART"
+            echo "[fetcher] download failed for $ART"; echo "REFRESH_FAIL app=$POD reason=download";
         fi
     fi
     sleep "$INTERVAL"
