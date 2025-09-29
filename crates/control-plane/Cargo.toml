@@ -29,6 +29,7 @@ hex = "0.4"
 aws-config = { version = "1", optional = true }
 aws-sdk-s3 = { version = "1", optional = true, default-features = true }
 async-trait = "0.1"
+url = "2"
 
 [features]
 default = ["s3"]

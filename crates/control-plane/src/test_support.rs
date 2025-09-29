@@ -36,7 +36,7 @@ pub async fn test_state() -> AppState {
 
 /// Ensure the test database exists (idempotent best-effort).
 async fn ensure_database(url: &str) {
-    use reqwest::Url; // already available in dev-dependencies
+    use url::Url;
     let parsed = match Url::parse(url) { Ok(p)=>p, Err(_)=> return };
     let db_name = parsed.path().trim_start_matches('/').to_string();
     if db_name.is_empty() { return; }

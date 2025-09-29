@@ -5,7 +5,6 @@ pub mod error;
 pub mod services;
 pub mod telemetry;
 pub mod storage;
-#[cfg(test)]
 pub mod test_support;
 
 // Re-export storage accessor to provide a stable import path even if the module path resolution behaves differently in some build contexts.
