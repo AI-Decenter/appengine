@@ -13,6 +13,8 @@ Cho phép lập trình viên cập nhật code mà không rebuild image: sidecar
 * [x] Tests: bổ sung unit test xác nhận sidecar tồn tại & annotation `aether.dev/dev-hot`.
 * [ ] E2E test: cập nhật digest -> sidecar kéo bản mới trong ≤10s (cần cluster test harness).
 * [x] Checksum verify trong sidecar loop (sha256sum -c trước extract) & configurable poll interval env `AETHER_FETCH_INTERVAL_SEC`.
+* [x] Structured log markers `REFRESH_OK` / `REFRESH_FAIL reason=<...>` trong fetcher script để phục vụ metrics ingestion.
+* [x] Metrics definitions (Prometheus): counters & histogram (`dev_hot_refresh_total`, `dev_hot_refresh_failure_total{reason}`, `dev_hot_refresh_latency_seconds`) – CHƯA có ingestion runtime.
 
 ## Acceptance
 | ID | Mô tả | Kết quả |
@@ -32,18 +34,19 @@ Implemented Issue 05 foundations:
 	- Nếu digest khác `CUR`, tải artifact, giải nén vào `/workspace`, cập nhật CUR.
 4. Annotation `aether.dev/dev-hot=true` để debugging / introspection.
 5. Unit test xác minh sidecar & annotation.
+6. Checksum verification + configurable interval trong loop.
+7. Structured log markers chuẩn hóa & metrics definitions (chưa wiring collection vào registry runtime events).
 
 ## Giới hạn hiện tại
 - Chưa có graceful reload (node process không tự restart/nodemon). Sau khi file hệ thống đổi, NodeJS không reload trừ khi code có cơ chế riêng hoặc ta dùng `nodemon` image.
-- Chưa verify checksum trong sidecar loop (có thể thêm sha256sum check tương tự init flow).
 - Sidecar đang grep JSON thô (simplistic); nên thay bằng jq nhỏ gọn hoặc một tiny Rust helper binary để tránh parsing fragile.
 - Không có backoff jitter / exponential delay.
-- Chưa có metrics (số lần refresh, latency). 
+- Metrics mới chỉ có definitions + log markers; CHƯA có task thu thập & increment thực tế.
 
 ## Next-Up / Future Enhancements
 1. Add graceful reload: đổi image `aether-nodejs:20-slim` -> layer cài `nodemon` và start `nodemon --watch /workspace server.js`.
 2. Robust JSON parse: thay grep bằng tiny helper (Rust) hoặc `jq` (nếu chấp nhận kích thước) + timeout / error classification.
-3. Metrics: `aether_dev_hot_refresh_total`, failures, checksum_mismatch_total, histogram refresh_latency_seconds.
+3. Metrics wiring: task đọc log markers hoặc sidecar -> control-plane endpoint để increment counters & observe latency.
 4. E2E integration test: patch digest -> assert file contents phục vụ mới trong ≤10s.
 5. Watcher optimization: dùng Kubernetes watch thay polling, event-driven update.
 6. Security hardening: RBAC minimal (get pod), bỏ `--no-check-certificate`, short-lived projected token.
@@ -61,7 +64,7 @@ Implemented Issue 05 foundations:
 - [ ] Graceful reload (nodemon / signal)
 - [x] Digest verify in hot loop
 - [ ] E2E latency test (H1/H2)
-- [ ] Metrics & observability
+- [ ] Metrics ingestion wiring (definitions + markers DONE)
 - [ ] Robust JSON parsing (no grep)
 
 ````
