@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 use crate::{AppState, models::Deployment, error::{ApiError, ApiResult, ApiErrorBody}, services};
+use sqlx::Row;
 // use sqlx::Row; // no longer needed after refactor
 
 #[derive(Deserialize, ToSchema)]
@@ -11,22 +12,35 @@ pub struct CreateDeploymentRequest { pub app_name: String, pub artifact_url: Str
 #[derive(Serialize, ToSchema)]
 pub struct CreateDeploymentResponse { pub id: Uuid, pub status: &'static str }
 
+fn extract_digest(s: &str) -> Option<String> {
+    for segment in s.split(|c| c=='/' || c=='?' || c=='&') { if segment.len()==64 && segment.chars().all(|c| c.is_ascii_hexdigit()) { return Some(segment.to_lowercase()); } }
+    None
+}
+
+async fn resolve_digest(db: &sqlx::Pool<sqlx::Postgres>, artifact_url: &str) -> Option<String> {
+    if let Some(d) = extract_digest(artifact_url) {
+        if let Ok(Some(row)) = sqlx::query("SELECT digest FROM artifacts WHERE digest=$1 AND status='stored'").bind(&d).fetch_optional(db).await { let dg: String = row.get("digest"); return Some(dg); }
+    }
+    None
+}
+
 /// Create deployment
 #[utoipa::path(post, path = "/deployments", request_body = CreateDeploymentRequest, responses( (status=201, body=CreateDeploymentResponse), (status=404, body=ApiErrorBody, description="app not found"), (status=400, body=ApiErrorBody), (status=500, body=ApiErrorBody) ))]
 #[tracing::instrument(level="info", skip(state, req), fields(app_name=%req.app_name))]
 pub async fn create_deployment(State(state): State<AppState>, Json(req): Json<CreateDeploymentRequest>) -> ApiResult<(StatusCode, Json<CreateDeploymentResponse>)> {
-    let deployment: Deployment = services::deployments::create_deployment(&state.db, &req.app_name, &req.artifact_url)
+    let resolved_digest = resolve_digest(&state.db, &req.artifact_url).await;
+    let deployment: Deployment = services::deployments::create_deployment(&state.db, &req.app_name, &req.artifact_url, resolved_digest.as_deref())
         .await.map_err(|e| {
             if matches!(e, sqlx::Error::RowNotFound) { return ApiError::not_found("application not found"); }
             ApiError::internal(format!("insert failure: {e}"))
         })?;
     tracing::info!(deployment_id=%deployment.id, "deployment created");
-    // Fire-and-forget k8s apply (Phase 2). TODO: capture digest from artifact metadata if available.
+    // Fire-and-forget k8s apply using resolved digest (if any) with SHA256 verification.
     let app_name = req.app_name.clone();
     let artifact_url = req.artifact_url.clone();
+    let digest_opt = resolved_digest.clone();
     tokio::spawn(async move {
-        // Derive a pseudo digest placeholder if URL contains one (later replaced by real artifact digest lookup)
-    let digest = artifact_url.rsplit('/').next().unwrap_or("");
+        let digest = digest_opt.as_deref().unwrap_or("");
         if let Err(e) = crate::k8s::apply_deployment(&app_name, digest, &artifact_url, "default").await {
             tracing::error!(error=%e, app=%app_name, "k8s apply failed");
         } else {
@@ -50,11 +64,24 @@ pub async fn list_deployments(State(state): State<AppState>, Query(q): Query<Dep
     let offset = q.offset.unwrap_or(0).max(0);
     let pool = &state.db;
     let rows: Vec<Deployment> = if let Some(app_name) = q.app_name {
-        sqlx::query_as::<_, Deployment>("SELECT d.id, d.app_id, d.artifact_url, d.status, d.created_at FROM deployments d JOIN applications a ON a.id = d.app_id WHERE a.name = $1 ORDER BY d.created_at DESC LIMIT $2 OFFSET $3")
+        sqlx::query_as::<_, Deployment>("SELECT d.id, d.app_id, d.artifact_url, d.status, d.created_at, d.digest, d.failure_reason FROM deployments d JOIN applications a ON a.id = d.app_id WHERE a.name = $1 ORDER BY d.created_at DESC LIMIT $2 OFFSET $3")
             .bind(app_name).bind(limit).bind(offset).fetch_all(pool).await.map_err(|e| ApiError::internal(format!("query error: {e}")))?
     } else {
-        sqlx::query_as::<_, Deployment>("SELECT id, app_id, artifact_url, status, created_at FROM deployments ORDER BY created_at DESC LIMIT $1 OFFSET $2")
+        sqlx::query_as::<_, Deployment>("SELECT id, app_id, artifact_url, status, created_at, digest, failure_reason FROM deployments ORDER BY created_at DESC LIMIT $1 OFFSET $2")
             .bind(limit).bind(offset).fetch_all(pool).await.map_err(|e| ApiError::internal(format!("query error: {e}")))?
     };
     Ok(Json(rows.into_iter().map(|d| DeploymentItem { id: d.id, app_id: d.app_id, artifact_url: d.artifact_url, status: d.status }).collect()))
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct DeploymentStatusResponse { pub id: Uuid, pub status: String, pub digest: Option<String>, pub failure_reason: Option<String>, pub artifact_url: String }
+
+#[utoipa::path(get, path="/deployments/{id}", params( ("id" = Uuid, Path, description="Deployment ID") ), responses( (status=200, body=DeploymentStatusResponse), (status=404, body=ApiErrorBody) ))]
+#[tracing::instrument(level="debug", skip(state))]
+pub async fn get_deployment(State(state): State<AppState>, axum::extract::Path(id): axum::extract::Path<Uuid>) -> ApiResult<Json<DeploymentStatusResponse>> {
+    let dep = services::deployments::get_deployment(&state.db, id).await.map_err(|e| {
+        if matches!(e, sqlx::Error::RowNotFound) { return ApiError::not_found("deployment not found"); }
+        ApiError::internal(format!("query error: {e}"))
+    })?;
+    Ok(Json(DeploymentStatusResponse { id: dep.id, status: dep.status, digest: dep.digest, failure_reason: dep.failure_reason, artifact_url: dep.artifact_url }))
 }

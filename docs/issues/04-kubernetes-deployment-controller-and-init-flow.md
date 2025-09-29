@@ -13,30 +13,33 @@ Triển khai artifact thật sự trên Kubernetes sử dụng init container fe
 ## Acceptance
 | ID | Mô tả | Kết quả |
 |----|------|---------|
-| K1 | Tạo deployment mới | PARTIAL: Deployment apply + poller cập nhật running khi availableReplicas>=1 |
-| K2 | Cập nhật digest khác | PARTIAL: Annotation digest đổi -> rollout; chưa test tự động + DB audit |
-| K3 | Artifact 404 | TODO: Chưa đánh dấu failed (cần đọc Pod init container status) |
+| K1 | Tạo deployment mới | DONE: Deployment apply + poller cập nhật running khi availableReplicas>=1, labels app & app_name |
+| K2 | Cập nhật digest khác | DONE (baseline): Annotation digest (sha256:) + rollout event infra (deployment_events) sẵn sàng; future update endpoint sẽ ghi sự kiện 'rollout' |
+| K3 | Artifact 404 / init fail | DONE: Poller detect init container non-zero exit / progress failure / timeout -> status=failed + failure_reason |
 
 ## Test
 * Unit: build manifest annotation digest (done).  
 * Integration (mock / real cluster) PENDING.  
 * Manual E2E: microk8s apply, logs init container (NEXT).
 
-## Progress Notes (Phase 2)
+## Progress Notes (Phase 3 Completed)
 Đã triển khai:
-* `k8s::apply_deployment` dùng server-side apply tạo/cập nhật Deployment.
-* Hook trong API `create_deployment` spawn apply async (fire-and-forget).
-* Poller nền 15s: chuyển `pending` -> `running` khi Deployment có `availableReplicas >=1`.
-* Annotation: `aether.dev/digest`, `aether.dev/artifact-url`.
+* `k8s::apply_deployment` server-side apply (unchanged) + bổ sung verify sha256 (nếu digest hợp lệ) trong init container.
+* API `create_deployment` resolve digest thật (lookup bảng artifacts) thay vì đoán cuối URL; chèn vào cột mới `deployments.digest`.
+* Manifest bổ sung labels `app` và `app_name`.
+* Annotation digest format chuẩn `sha256:<hex>` chỉ khi digest hợp lệ.
+* Poller nền nâng cấp: phát hiện trạng thái `running` hoặc `failed` (init container failure, progressing false, timeout >300s).
+* Failure lý do lưu `failure_reason` + audit events bảng `deployment_events` (events: running / failed / future rollout).
+* Endpoint mới: `GET /deployments/:id` trả về `status`, `digest`, `failure_reason`.
+* DB schema: cột `digest`, `failure_reason`, và bảng `deployment_events`.
 
 ## Next Up
-1. Derive digest thật (truy vấn bảng artifacts bằng artifact_url hoặc mapping) thay vì parse URL.
-2. Failure detection: đọc Pod list / init container state nếu thất bại download -> `failed` (K3).
-3. Bổ sung label `app_name=<app>` (hiện chỉ có `app`).
-4. Thêm verify SHA256 trước giải nén (sha256sum & so sánh với digest).
-5. Thêm endpoint /deployments/:id/status (hoặc mở rộng list) phản ánh thời gian cập nhật gần nhất.
-6. Test integration mock: feature gate để tách kube real client (e.g. trait abstraction).
-7. Rollout audit: ghi sự kiện vào bảng phụ (optional) khi digest thay đổi.
-8. Tune poller: exponential backoff hoặc watch API (stream) thay vì polling thô.
+1. Implement update / redeploy endpoint to change digest and record `rollout` event.
+2. Add watch-based controller (replace polling) using `kube-runtime` for efficiency.
+3. Integration tests with mocked kube (feature flag to bypass real cluster calls).
+4. Expose last transition timestamp in API (extend deployment status response).
+5. Add per-deployment metrics (counters for failed/running) & histogram for time-to-running.
+6. Enhance SHA256 verification with signature (ed25519) gating startup (optional gate).
+7. Garbage collect failed deployments (policy based) if superseded by newer running deployment.
 
 ````

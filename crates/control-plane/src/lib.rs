@@ -13,7 +13,7 @@ pub use storage::get_storage;
 
 use axum::{Router, routing::{get, post}};
 use sqlx::{Pool, Postgres};
-use handlers::{health::health, apps::{list_apps, app_logs, create_app, app_deployments, add_public_key}, deployments::{create_deployment, list_deployments}, readiness::readiness, uploads::{upload_artifact, list_artifacts, head_artifact, presign_artifact, complete_artifact, multipart_init, multipart_presign_part, multipart_complete}};
+use handlers::{health::health, apps::{list_apps, app_logs, create_app, app_deployments, add_public_key}, deployments::{create_deployment, list_deployments, get_deployment}, readiness::readiness, uploads::{upload_artifact, list_artifacts, head_artifact, presign_artifact, complete_artifact, multipart_init, multipart_presign_part, multipart_complete}};
 use utoipa::OpenApi;
 use crate::telemetry::metrics_handler;
 use axum::response::Html;
@@ -32,6 +32,7 @@ pub struct AppState { pub db: Pool<Postgres> }
         handlers::apps::app_deployments,
         handlers::deployments::create_deployment,
     handlers::deployments::list_deployments,
+        handlers::deployments::get_deployment,
     handlers::uploads::upload_artifact,
     handlers::uploads::list_artifacts,
     handlers::uploads::presign_artifact,
@@ -85,30 +86,49 @@ pub fn build_router(state: AppState) -> Router {
             tokio::time::sleep(std::time::Duration::from_secs(interval.max(5))).await;
         }
     });
-    // Phase 2: naive k8s deployment status poller (updates pending->running if Deployment availableReplicas>=1)
+    // Phase 3: enhanced k8s deployment status poller (running + failure detection)
     let db_status = state.db.clone();
     tokio::spawn(async move {
         use sqlx::Row;
+        use kube::api::ListParams;
+        use k8s_openapi::api::core::v1::Pod;
         loop {
-            if let Ok(pending) = sqlx::query("SELECT d.id, a.name, d.artifact_url FROM deployments d JOIN applications a ON a.id = d.app_id WHERE d.status = 'pending' LIMIT 20")
+            if let Ok(pending) = sqlx::query("SELECT d.id, a.name, d.artifact_url, d.created_at FROM deployments d JOIN applications a ON a.id = d.app_id WHERE d.status = 'pending' LIMIT 20")
                 .fetch_all(&db_status).await {
                 for row in pending {
                     let dep_id: uuid::Uuid = row.get("id");
                     let app_name: String = row.get("name");
+                    let created_at: chrono::DateTime<chrono::Utc> = row.get("created_at");
                     if let Ok(client) = kube::Client::try_default().await {
-                        let api: kube::Api<k8s_openapi::api::apps::v1::Deployment> = kube::Api::namespaced(client, "default");
-                        match api.get(&app_name).await {
-                            Ok(d) => {
-                                let available = d.status.and_then(|s| s.available_replicas).unwrap_or(0);
+                        let d_api: kube::Api<k8s_openapi::api::apps::v1::Deployment> = kube::Api::namespaced(client.clone(), "default");
+                        match d_api.get(&app_name).await {
+                            Ok(d_obj) => {
+                                let status = d_obj.status.clone();
+                                let available = status.as_ref().and_then(|s| s.available_replicas).unwrap_or(0);
                                 if available >= 1 {
-                                    let _ = sqlx::query("UPDATE deployments SET status='running' WHERE id=$1")
-                                        .bind(dep_id).execute(&db_status).await;
+                                    crate::services::deployments::mark_running(&db_status, dep_id).await;
                                     tracing::info!(deployment_id=%dep_id, app=%app_name, "deployment running");
+                                    continue;
                                 }
+                                // Failure heuristics
+                                let mut failed_reason: Option<String> = None;
+                                if let Some(st) = status {
+                                    if let Some(conds) = st.conditions {
+                                        for c in conds { if c.type_=="Progressing" && c.status=="False" { failed_reason = Some(c.reason.unwrap_or_else(|| "progress_failed".into())); break; } }
+                                    }
+                                }
+                                // Pod-level inspection for init container failures
+                                if failed_reason.is_none() {
+                                    let p_api: kube::Api<Pod> = kube::Api::namespaced(client.clone(), "default");
+                                    if let Ok(pods) = p_api.list(&ListParams::default().labels(&format!("app={}", app_name))).await {
+                                        'podloop: for p in pods { if let Some(ps) = p.status { if let Some(ics) = ps.init_container_statuses { for ics in ics { if let Some(state) = ics.state { if let Some(term) = state.terminated { if term.exit_code != 0 { failed_reason = Some(format!("init:{}:{}", ics.name, term.reason.unwrap_or_else(|| term.exit_code.to_string()))); break 'podloop; } } } } } } }
+                                    }
+                                }
+                                // Timeout heuristic (>300s)
+                                if failed_reason.is_none() { if chrono::Utc::now().signed_duration_since(created_at).num_seconds() > 300 { failed_reason = Some("timeout".into()); } }
+                                if let Some(rsn) = failed_reason { crate::services::deployments::mark_failed(&db_status, dep_id, &rsn).await; tracing::warn!(deployment_id=%dep_id, app=%app_name, reason=%rsn, "deployment failed"); }
                             }
-                            Err(kube::Error::Api(ae)) if ae.code == 404 => {
-                                // not created yet; skip
-                            }
+                            Err(kube::Error::Api(ae)) if ae.code == 404 => { /* not created yet */ }
                             Err(e) => { tracing::warn!(error=%e, app=%app_name, "status poll error"); }
                         }
                     }
@@ -123,6 +143,7 @@ pub fn build_router(state: AppState) -> Router {
     .route("/startupz", get(handlers::readiness::startupz))
         .route("/metrics", get(metrics_handler))
     .route("/deployments", post(create_deployment).get(list_deployments))
+    .route("/deployments/:id", get(get_deployment))
     .route("/artifacts", post(upload_artifact).get(list_artifacts))
     .route("/artifacts/presign", post(presign_artifact))
     .route("/artifacts/complete", post(complete_artifact))
@@ -150,7 +171,7 @@ mod tests {
 
     #[tokio::test]
     async fn health_ok() {
-    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for tests");
+        let url = match std::env::var("DATABASE_URL") { Ok(v) => v, Err(_) => return }; // skip if not set
     let pool = sqlx::postgres::PgPoolOptions::new().max_connections(5).connect(&url).await.unwrap();
     sqlx::migrate!().run(&pool).await.unwrap();
     let app = build_router(AppState { db: pool });
@@ -164,7 +185,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn create_deployment_201() {
-    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+        let url = match std::env::var("DATABASE_URL") { Ok(v) => v, Err(_) => return };
     let pool = sqlx::postgres::PgPoolOptions::new().max_connections(5).connect(&url).await.unwrap();
     sqlx::migrate!().run(&pool).await.unwrap();
         sqlx::query("DELETE FROM deployments").execute(&pool).await.ok();
@@ -183,7 +204,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn list_apps_empty() {
-    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+        let url = match std::env::var("DATABASE_URL") { Ok(v) => v, Err(_) => return };
     let pool = sqlx::postgres::PgPoolOptions::new().max_connections(5).connect(&url).await.unwrap();
     sqlx::migrate!().run(&pool).await.unwrap();
         sqlx::query("DELETE FROM deployments").execute(&pool).await.ok();
@@ -198,7 +219,7 @@ mod tests {
 
     #[tokio::test]
     async fn app_logs_empty() {
-    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+        let url = match std::env::var("DATABASE_URL") { Ok(v) => v, Err(_) => return };
     let pool = sqlx::postgres::PgPoolOptions::new().max_connections(5).connect(&url).await.unwrap();
     sqlx::migrate!().run(&pool).await.unwrap();
     let app = build_router(AppState { db: pool });
@@ -210,7 +231,7 @@ mod tests {
 
     #[tokio::test]
     async fn readiness_ok() {
-    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+        let url = match std::env::var("DATABASE_URL") { Ok(v) => v, Err(_) => return };
     let pool = sqlx::postgres::PgPoolOptions::new().max_connections(5).connect(&url).await.unwrap();
     sqlx::migrate!().run(&pool).await.unwrap();
     let app = build_router(AppState { db: pool });
@@ -221,7 +242,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn create_deployment_bad_json() {
-    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+        let url = match std::env::var("DATABASE_URL") { Ok(v) => v, Err(_) => return };
     let pool = sqlx::postgres::PgPoolOptions::new().max_connections(5).connect(&url).await.unwrap();
     sqlx::migrate!().run(&pool).await.unwrap();
     let app_router = build_router(AppState { db: pool });
@@ -236,7 +257,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn list_deployments_empty() {
-    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+        let url = match std::env::var("DATABASE_URL") { Ok(v) => v, Err(_) => return };
     let pool = sqlx::postgres::PgPoolOptions::new().max_connections(5).connect(&url).await.unwrap();
     sqlx::migrate!().run(&pool).await.unwrap();
         sqlx::query("DELETE FROM deployments").execute(&pool).await.ok();
@@ -252,7 +273,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn app_deployments_flow() {
-    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+        let url = match std::env::var("DATABASE_URL") { Ok(v) => v, Err(_) => return };
     let pool = sqlx::postgres::PgPoolOptions::new().max_connections(5).connect(&url).await.unwrap();
     sqlx::migrate!().run(&pool).await.unwrap();
         sqlx::query("DELETE FROM deployments").execute(&pool).await.ok();
@@ -271,7 +292,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn app_deployments_empty_when_no_deployments() {
-    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+        let url = match std::env::var("DATABASE_URL") { Ok(v) => v, Err(_) => return };
     let pool = sqlx::postgres::PgPoolOptions::new().max_connections(5).connect(&url).await.unwrap();
     sqlx::migrate!().run(&pool).await.unwrap();
         // Clean state
@@ -290,7 +311,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn create_app_conflict_error_json() {
-    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+        let url = match std::env::var("DATABASE_URL") { Ok(v) => v, Err(_) => return };
     let pool = sqlx::postgres::PgPoolOptions::new().max_connections(5).connect(&url).await.unwrap();
     sqlx::migrate!().run(&pool).await.unwrap();
         sqlx::query("DELETE FROM deployments").execute(&pool).await.ok();

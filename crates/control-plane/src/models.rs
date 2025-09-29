@@ -7,7 +7,15 @@ use chrono::{DateTime, Utc};
 pub struct Application { pub id: Uuid, pub name: String, pub created_at: DateTime<Utc>, pub updated_at: DateTime<Utc> }
 
 #[derive(sqlx::FromRow, Serialize, Deserialize, Debug, Clone)]
-pub struct Deployment { pub id: Uuid, pub app_id: Uuid, pub artifact_url: String, pub status: String, pub created_at: DateTime<Utc> }
+pub struct Deployment {
+	pub id: Uuid,
+	pub app_id: Uuid,
+	pub artifact_url: String,
+	pub status: String,
+	pub created_at: DateTime<Utc>,
+	pub digest: Option<String>,
+	pub failure_reason: Option<String>,
+}
 
 #[derive(sqlx::FromRow, Serialize, Deserialize, Debug, Clone, ToSchema)]
 pub struct Artifact {

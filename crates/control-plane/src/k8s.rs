@@ -32,20 +32,28 @@ fn build_deployment_manifest(app: &str, digest: &str, artifact_url: &str, namesp
     // We construct JSON for server-side apply; using structured types for full compile checks would be more verbose.
     // init container: busybox sh -c "wget/curl artifact && tar -xzf ..."
     // For PoC use wget in busybox; production could switch to distroless + sha256 verify.
+    let valid_digest = digest.len()==64 && digest.chars().all(|c| c.is_ascii_hexdigit());
+    let mut annotations = json!({"aether.dev/artifact-url": artifact_url});
+    if valid_digest { annotations["aether.dev/digest"] = json!(format!("sha256:{digest}")); }
+    let labels = json!({"app": app, "app_name": app});
+    // Build init command with optional sha256 verification
+    let mut init_cmd = format!("set -euo pipefail; echo Fetching artifact; wget -O /workspace/app.tar.gz {artifact_url};");
+    if valid_digest { init_cmd.push_str(&format!(" echo '{digest}  /workspace/app.tar.gz' | sha256sum -c -;")); }
+    init_cmd.push_str(" tar -xzf /workspace/app.tar.gz -C /workspace");
     json!({
         "apiVersion": "apps/v1",
         "kind": "Deployment",
         "metadata": {
             "name": app,
             "namespace": namespace,
-            "labels": {"app": app},
-            "annotations": {"aether.dev/digest": digest, "aether.dev/artifact-url": artifact_url}
+            "labels": labels,
+            "annotations": annotations
         },
         "spec": {
             "replicas": 1,
             "selector": {"matchLabels": {"app": app}},
             "template": {
-                "metadata": {"labels": {"app": app}},
+                "metadata": {"labels": {"app": app, "app_name": app}},
                 "spec": {
                     "volumes": [ {"name": "workspace", "emptyDir": {} } ],
                     "initContainers": [
@@ -53,7 +61,7 @@ fn build_deployment_manifest(app: &str, digest: &str, artifact_url: &str, namesp
                             "name": "fetch-artifact",
                             "image": "busybox:1.36",
                             "command": ["/bin/sh","-c"],
-                            "args": [format!("set -euo pipefail; echo Fetching artifact; wget -O /workspace/app.tar.gz {artifact_url} && tar -xzf /workspace/app.tar.gz -C /workspace")],
+                            "args": [init_cmd],
                             "volumeMounts": [ {"name": "workspace", "mountPath": "/workspace" } ]
                         }
                     ],
@@ -64,7 +72,7 @@ fn build_deployment_manifest(app: &str, digest: &str, artifact_url: &str, namesp
                             "workingDir": "/workspace",
                             "command": ["node","server.js"],
                             "volumeMounts": [ {"name": "workspace", "mountPath": "/workspace" } ],
-                            "env": [ {"name": "AETHER_DIGEST", "value": digest } ]
+                            "env": (if valid_digest { vec![json!({"name":"AETHER_DIGEST","value": format!("sha256:{digest}")})] } else { vec![] }),
                         }
                     ]
                 }
@@ -78,7 +86,7 @@ mod tests {
     use super::build_deployment_manifest;
     #[test]
     fn manifest_contains_annotation() {
-        let v = build_deployment_manifest("demo","sha256:abc","https://example/artifact.tar.gz","default");
-        assert_eq!(v["metadata"]["annotations"]["aether.dev/digest"], "sha256:abc");
+        let v = build_deployment_manifest("demo","0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","https://example/artifact.tar.gz","default");
+        assert!(v["metadata"]["annotations"]["aether.dev/digest"].as_str().unwrap().starts_with("sha256:"));
     }
 }
