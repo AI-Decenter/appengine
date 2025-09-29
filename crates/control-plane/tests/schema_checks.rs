@@ -14,7 +14,13 @@ fn init_tracing() {
 #[tokio::test]
 async fn schema_core_tables_exist() {
     init_tracing();
-    let url = match std::env::var("DATABASE_URL") { Ok(v)=>v, Err(_)=> { eprintln!("skipping schema_core_tables_exist: DATABASE_URL not set"); return; } };
+    let url = match std::env::var("DATABASE_URL") { Ok(v)=>v, Err(_)=> {
+        // Fallback: spin up testcontainer via shared harness
+        eprintln!("[schema_checks] DATABASE_URL missing; starting testcontainer Postgres via test_support");
+        let pool = control_plane::test_support::test_pool().await; // triggers container + migrations
+        // Retrieve URL from pool options via PgPoolOptions debug (not directly accessible). Instead just reuse env var now set by harness.
+        std::env::var("DATABASE_URL").expect("harness should set DATABASE_URL")
+    } };
     let pool = init_db(&url).await.expect("db init failed");
     sqlx::migrate!().run(&pool).await.expect("migrations failed");
     let required = ["applications","artifacts","public_keys","deployments"];

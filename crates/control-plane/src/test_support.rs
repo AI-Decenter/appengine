@@ -88,30 +88,23 @@ async fn build_test_pool(shared: bool) -> Pool<Postgres> {
         let pool = match pool_opt {
             Some(p) => p,
             None => {
-                // Attempt embedded Postgres fallback if allowed (default allow). Disable by setting AETHER_DISABLE_EMBEDDED_PG=1
-                if std::env::var("AETHER_DISABLE_EMBEDDED_PG").ok().as_deref() != Some("1") {
-                    eprintln!("[test_pool] No external Postgres reachable. Launching embedded Postgres for tests...");
-                    match launch_embedded_pg().await {
-                        Ok((url, _guard)) => {
-                            // Keep guard alive in static to hold process for test lifetime
-                            use once_cell::sync::OnceCell;
-                            static PG_GUARD: OnceCell<pg_embed::postgres::PgEmbed> = OnceCell::new();
-                            let embed_ref = _guard; // rename
-                            PG_GUARD.set(embed_ref).ok();
-                            // Connect a pool now
-                            let pool = sqlx::postgres::PgPoolOptions::new().max_connections(5).connect(&url).await.expect("embed pg pool");
-                            sqlx::migrate!().run(&pool).await.expect("migrations (embedded)");
-                            pool
-                        }
-                        Err(e) => {
-                            eprintln!("[test_pool] Embedded Postgres launch failed: {e}");
-                            eprintln!("[test_pool] All connection candidates failed:\n{}", candidates.join("\n"));
-                            panic!("Failed to connect to Postgres (external + embedded). Set DATABASE_URL or install local postgres.");
-                        }
+                // Fallback: start a Postgres test container (requires Docker). Can be disabled via AETHER_DISABLE_TESTCONTAINERS=1
+                if std::env::var("AETHER_DISABLE_TESTCONTAINERS").ok().as_deref()==Some("1") {
+                    eprintln!("[test_pool] All connection candidates failed and testcontainers disabled. Candidates: \n{}", candidates.join("\n"));
+                    panic!("No Postgres available for tests and testcontainers disabled");
+                }
+                match start_testcontainer_postgres().await {
+                    Ok(url) => {
+                        eprintln!("[test_pool] Started Postgres testcontainer at {url}");
+                        let pool = sqlx::postgres::PgPoolOptions::new().max_connections(5).connect(&url).await.expect("testcontainer pg pool");
+                        sqlx::migrate!().run(&pool).await.expect("migrations (testcontainer)");
+                        pool
                     }
-                } else {
-                    eprintln!("[test_pool] All connection candidates failed and embedded disabled:\n{}", candidates.join("\n"));
-                    panic!("Failed to connect to Postgres (see above candidates). Set TEST DATABASE_URL or start docker compose.");
+                    Err(e) => {
+                        eprintln!("[test_pool] Failed to start Postgres testcontainer: {e}");
+                        eprintln!("[test_pool] Candidates attempted: \n{}", candidates.join("\n"));
+                        panic!("Failed to provision Postgres for tests");
+                    }
                 }
             }
         };
@@ -187,51 +180,46 @@ async fn ensure_database(url: &str) {
     }
 }
 
-// Launch an embedded Postgres instance on a dynamic port.
-// Returns (database_url, guard) where guard must stay alive.
-async fn launch_embedded_pg() -> anyhow::Result<(String, pg_embed::postgres::PgEmbed)> {
-    use pg_embed::{postgres::{PgEmbed, PgSettings}, pg_enums::PgAuthMethod, pg_fetch::{PgFetchSettings, PG_V15}};
-    use std::path::PathBuf;
+// Start a Postgres test container using testcontainers crate and share for test lifetime.
+// Returns a connection URL to database "aether_test" (created if missing).
+async fn start_testcontainer_postgres() -> anyhow::Result<String> {
+    use tokio::sync::OnceCell;
+    use testcontainers::{runners::AsyncRunner, ContainerAsync, GenericImage, ImageExt};
+    use testcontainers::core::IntoContainerPort;
     use sqlx::Connection;
-    let port = portpicker::pick_unused_port().unwrap_or(55432);
-    let target_dir = std::env::var("CARGO_TARGET_DIR").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("target"));
-    let data_dir = target_dir.join("embedded-pg-test");
-    let db_dir = data_dir.clone();
-    for attempt in 1..=2 {
-        let settings_attempt = PgSettings {
-            database_dir: db_dir.clone(),
-            port: port as u16,
-            user: "aether".into(),
-            password: "postgres".into(),
-            auth_method: PgAuthMethod::Plain,
-            persistent: true,
-            timeout: Some(std::time::Duration::from_secs(15)),
-            migration_dir: None,
-        };
-        let fetch_attempt = PgFetchSettings { version: PG_V15, ..Default::default() };
-        match PgEmbed::new(settings_attempt, fetch_attempt).await {
-            Ok(mut pg) => {
-                if let Err(e) = pg.setup().await { eprintln!("[embedded-pg] attempt {attempt} setup failed: {e}"); }
-                if let Err(e) = pg.start_db().await {
-                    eprintln!("[embedded-pg] attempt {attempt} start failed: {e}");
-                    if attempt == 2 { return Err(e.into()); }
-                    let _ = std::fs::remove_dir_all(&db_dir);
-                    continue;
-                }
-                let admin_url = format!("{}/postgres", pg.db_uri);
-                let mut admin_conn = sqlx::postgres::PgConnection::connect(&admin_url).await?;
-                let _ = sqlx::query("CREATE DATABASE aether_test").execute(&mut admin_conn).await;
-                let db_url = format!("{}/aether_test", pg.db_uri);
-                eprintln!("[embedded-pg] started at {}", db_url);
-                return Ok((db_url, pg));
-            }
+    static CONTAINER: OnceCell<ContainerAsync<GenericImage>> = OnceCell::const_new();
+    let container = CONTAINER.get_or_init(|| async {
+        let image_name = std::env::var("AETHER_TEST_PG_IMAGE").unwrap_or_else(|_| "postgres:15-alpine".to_string());
+        let mut parts = image_name.split(':');
+        let name = parts.next().unwrap_or("postgres");
+        let tag = parts.next().unwrap_or("15-alpine");
+    let img = GenericImage::new(name, tag).with_exposed_port(5432.tcp());
+        let req = img
+            .with_env_var("POSTGRES_USER", "aether")
+            .with_env_var("POSTGRES_PASSWORD", "postgres")
+            .with_env_var("POSTGRES_DB", "postgres");
+        req.start().await.expect("start postgres testcontainer")
+    }).await;
+    let host = container.get_host().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let base_url = format!("postgres://aether:postgres@{}:{}/", host, port);
+    // Poll for readiness
+    let admin_url = format!("{}postgres", base_url);
+    for attempt in 0..30u32 { // up to ~30s
+        match sqlx::postgres::PgConnection::connect(&admin_url).await {
+            Ok(mut c) => { let _ = sqlx::query("SELECT 1").execute(&mut c).await; break; }
             Err(e) => {
-                eprintln!("[embedded-pg] constructor failed: {e}");
-                if attempt == 2 { return Err(e.into()); }
-                let _ = std::fs::remove_dir_all(&db_dir);
-                continue;
+                if attempt == 29 { return Err(anyhow::anyhow!("postgres testcontainer not ready after retries: {e}")); }
+                tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
             }
         }
     }
-    Err(anyhow::anyhow!("embedded pg retry logic exhausted"))
+    let mut admin = sqlx::postgres::PgConnection::connect(&admin_url).await?;
+    let _ = sqlx::query("CREATE DATABASE aether_test").execute(&mut admin).await;
+    let db_url = format!("{}aether_test", base_url);
+    // Export for tests that expect DATABASE_URL explicitly
+    if std::env::var("DATABASE_URL").is_err() {
+        std::env::set_var("DATABASE_URL", &db_url);
+    }
+    Ok(db_url)
 }
