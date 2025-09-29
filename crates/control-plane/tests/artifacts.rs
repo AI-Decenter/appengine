@@ -1,15 +1,46 @@
 use control_plane::{build_router, AppState};
+use reqwest::Url;
 use axum::{http::{Request, StatusCode}, body::Body};
 use tower::util::ServiceExt;
 use serde_json::json;
 
 async fn setup() -> control_plane::AppState {
-    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for tests");
-    let pool = sqlx::postgres::PgPoolOptions::new().max_connections(5).connect(&url).await.unwrap();
-    sqlx::migrate!().run(&pool).await.unwrap();
-    sqlx::query("DELETE FROM artifacts").execute(&pool).await.ok();
-    sqlx::query("DELETE FROM applications").execute(&pool).await.ok();
+    // Allow tests to run without externally provided DATABASE_URL by falling back to a conventional local instance.
+    // Default credentials match common local dev setups: postgres:postgres@localhost:5432
+    let url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432/aether_test".into());
+    ensure_database(&url).await;
+    let pool = sqlx::postgres::PgPoolOptions::new().max_connections(5).connect(&url).await.expect("connect test db");
+    sqlx::migrate!().run(&pool).await.expect("run migrations");
+    // Clean tables (order matters if FKs appear later)
+    let _ = sqlx::query("DELETE FROM artifacts").execute(&pool).await;
+    let _ = sqlx::query("DELETE FROM applications").execute(&pool).await;
     AppState { db: pool }
+}
+
+/// Ensure the target database exists; if missing, create it using a temporary admin connection to the 'postgres' db.
+async fn ensure_database(url: &str) {
+    // Parse database name from URL path component.
+    let parsed = match Url::parse(url) { Ok(u)=>u, Err(_)=> return }; // If parse fails, bail; subsequent connect will error clearly.
+    let db_name = parsed.path().trim_start_matches('/').to_string();
+    if db_name.is_empty() { return; }
+    let mut admin = parsed.clone();
+    admin.set_path("/postgres");
+    if let Ok(admin_pool) = sqlx::postgres::PgPoolOptions::new().max_connections(1).connect(admin.as_str()).await {
+        // Check existence
+        let exists: Option<String> = sqlx::query_scalar("SELECT datname FROM pg_database WHERE datname = $1")
+            .bind(&db_name)
+            .fetch_optional(&admin_pool)
+            .await
+            .ok()
+            .flatten();
+        if exists.is_none() {
+            // Unsafe identifier interpolation avoided by simple character whitelist check.
+            if db_name.chars().all(|c| c.is_ascii_alphanumeric() || c=='_' ) {
+                let create_sql = format!("CREATE DATABASE {}", db_name);
+                let _ = sqlx::query(&create_sql).execute(&admin_pool).await; // ignore race / errors
+            }
+        }
+    }
 }
 
 #[tokio::test]
