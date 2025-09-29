@@ -1,5 +1,7 @@
 use anyhow::Result;
+#[cfg(not(feature = "mock-kube"))]
 use k8s_openapi::api::apps::v1::Deployment;
+#[cfg(not(feature = "mock-kube"))]
 use kube::{Api, Client, api::{PatchParams, Patch}};
 use serde_json::json;
 
@@ -36,6 +38,7 @@ pub async fn apply_deployment(app: &str, digest: &str, artifact_url: &str, names
     Ok(())
 }
 
+#[allow(dead_code)] // used in tests & runtime when k8s feature active
 fn build_deployment_manifest(app: &str, digest: &str, artifact_url: &str, namespace: &str, signature: Option<&str>) -> serde_json::Value {
     // We construct JSON for server-side apply; using structured types for full compile checks would be more verbose.
     // init container: busybox sh -c "wget/curl artifact && tar -xzf ..."

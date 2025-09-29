@@ -13,18 +13,17 @@ pub async fn run_deployment_status_watcher(db: Pool<sqlx::Postgres>) {
         Err(e) => { tracing::warn!(error=%e, "K8s client init failed"); return; }
     };
     let d_api: Api<K8sDeployment> = Api::namespaced(client.clone(), "default");
-    let mut watcher_stream = watcher(d_api, Config::default());
-    futures_util::pin_mut!(watcher_stream);
-    while let Some(ev) = watcher_stream.next().await {
+    let stream = watcher(d_api, Config::default());
+    futures_util::pin_mut!(stream);
+    while let Some(ev) = stream.next().await {
         match ev {
             Ok(Event::Applied(d_obj)) => {
                 let app_name = d_obj.name_any();
                 let status = d_obj.status.clone();
                 let available = status.as_ref().and_then(|s| s.available_replicas).unwrap_or(0);
                 // Find pending deployment in DB
-                if let Ok(row) = sqlx::query("SELECT d.id, d.created_at FROM deployments d JOIN applications a ON a.id = d.app_id WHERE a.name = $1 AND d.status = 'pending' LIMIT 1")
+                if let Ok(Some(row)) = sqlx::query("SELECT d.id, d.created_at FROM deployments d JOIN applications a ON a.id = d.app_id WHERE a.name = $1 AND d.status = 'pending' LIMIT 1")
                     .bind(&app_name).fetch_optional(&db).await {
-                    if let Some(row) = row {
                         let dep_id: uuid::Uuid = row.get("id");
                         let created_at: chrono::DateTime<chrono::Utc> = row.get("created_at");
                         if available >= 1 {
@@ -53,7 +52,6 @@ pub async fn run_deployment_status_watcher(db: Pool<sqlx::Postgres>) {
                             failed_reason = Some("timeout".into());
                         }
                         if let Some(rsn) = failed_reason { crate::services::deployments::mark_failed(&db, dep_id, &rsn).await; tracing::warn!(deployment_id=%dep_id, app=%app_name, reason=%rsn, "deployment failed (watch)"); }
-                    }
                 }
             }
             Ok(Event::Restarted(objs)) => {

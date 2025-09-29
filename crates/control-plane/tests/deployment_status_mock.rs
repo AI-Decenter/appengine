@@ -24,7 +24,7 @@ async fn mock_kube_deployment_status_transition() {
         row.get("id")
     };
     let patch_body = serde_json::json!({"digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}).to_string();
-    let patch_req = Request::builder().method("PATCH").uri(&format!("/deployments/{}", dep_id))
+    let patch_req = Request::builder().method("PATCH").uri(format!("/deployments/{}", dep_id))
         .header("content-type","application/json")
         .body(Body::from(patch_body)).unwrap();
     let patch_res = app.clone().oneshot(patch_req).await.unwrap();
