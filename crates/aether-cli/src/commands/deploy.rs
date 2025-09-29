@@ -15,7 +15,7 @@ use std::io::Read;
 use tokio_util::io::ReaderStream;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::time::Instant;
-use atty;
+use std::io::IsTerminal;
 
 #[derive(Debug, Clone, Copy)]
 enum PackageManager { Npm, Yarn, Pnpm }
@@ -385,7 +385,7 @@ async fn two_phase_upload(artifact:&Path, root:&Path, base:&str, digest:&str, si
         if let Some(hdrs) = presign_json.get("headers").and_then(|h| h.as_object()) {
             for (k,v) in hdrs.iter() { if let Some(val)=v.as_str() { put_req = put_req.header(k, val); } }
         }
-        let use_progress = atty::is(atty::Stream::Stderr) && len > 512 * 1024; // show for larger files in tty
+    let use_progress = std::io::stderr().is_terminal() && len > 512 * 1024; // show for larger files in tty
         let pb = if use_progress { let pb = ProgressBar::new(len); pb.set_style(ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})").unwrap().progress_chars("=>-")); Some(pb) } else { None };
         let start_put = Instant::now();
         if len <= 512 * 1024 { // buffer
@@ -447,7 +447,7 @@ async fn multipart_upload(artifact:&Path, root:&Path, base:&str, digest:&str, si
     // chunk file
     let part_size = std::env::var("AETHER_MULTIPART_PART_SIZE_BYTES").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(8*1024*1024);
     let meta = fs::metadata(artifact)?; let total = meta.len();
-    let use_progress = atty::is(atty::Stream::Stderr) && total > part_size;
+    let use_progress = std::io::stderr().is_terminal() && total > part_size;
     let pb = if use_progress { let pb = ProgressBar::new(total); pb.set_style(ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})").unwrap()); Some(pb) } else { None };
     let mut file = tokio::fs::File::open(artifact).await.map_err(|e| CliError::with_source(CliErrorKind::Io("open artifact".into()), e))?;
     use tokio::io::AsyncReadExt;
