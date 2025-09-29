@@ -85,6 +85,38 @@ pub fn build_router(state: AppState) -> Router {
             tokio::time::sleep(std::time::Duration::from_secs(interval.max(5))).await;
         }
     });
+    // Phase 2: naive k8s deployment status poller (updates pending->running if Deployment availableReplicas>=1)
+    let db_status = state.db.clone();
+    tokio::spawn(async move {
+        use sqlx::Row;
+        loop {
+            if let Ok(pending) = sqlx::query("SELECT d.id, a.name, d.artifact_url FROM deployments d JOIN applications a ON a.id = d.app_id WHERE d.status = 'pending' LIMIT 20")
+                .fetch_all(&db_status).await {
+                for row in pending {
+                    let dep_id: uuid::Uuid = row.get("id");
+                    let app_name: String = row.get("name");
+                    if let Ok(client) = kube::Client::try_default().await {
+                        let api: kube::Api<k8s_openapi::api::apps::v1::Deployment> = kube::Api::namespaced(client, "default");
+                        match api.get(&app_name).await {
+                            Ok(d) => {
+                                let available = d.status.and_then(|s| s.available_replicas).unwrap_or(0);
+                                if available >= 1 {
+                                    let _ = sqlx::query("UPDATE deployments SET status='running' WHERE id=$1")
+                                        .bind(dep_id).execute(&db_status).await;
+                                    tracing::info!(deployment_id=%dep_id, app=%app_name, "deployment running");
+                                }
+                            }
+                            Err(kube::Error::Api(ae)) if ae.code == 404 => {
+                                // not created yet; skip
+                            }
+                            Err(e) => { tracing::warn!(error=%e, app=%app_name, "status poll error"); }
+                        }
+                    }
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+        }
+    });
     Router::new()
         .route("/health", get(health))
     .route("/readyz", get(readiness))

@@ -21,6 +21,18 @@ pub async fn create_deployment(State(state): State<AppState>, Json(req): Json<Cr
             ApiError::internal(format!("insert failure: {e}"))
         })?;
     tracing::info!(deployment_id=%deployment.id, "deployment created");
+    // Fire-and-forget k8s apply (Phase 2). TODO: capture digest from artifact metadata if available.
+    let app_name = req.app_name.clone();
+    let artifact_url = req.artifact_url.clone();
+    tokio::spawn(async move {
+        // Derive a pseudo digest placeholder if URL contains one (later replaced by real artifact digest lookup)
+    let digest = artifact_url.rsplit('/').next().unwrap_or("");
+        if let Err(e) = crate::k8s::apply_deployment(&app_name, digest, &artifact_url, "default").await {
+            tracing::error!(error=%e, app=%app_name, "k8s apply failed");
+        } else {
+            tracing::info!(app=%app_name, "k8s apply scheduled");
+        }
+    });
     Ok((StatusCode::CREATED, Json(CreateDeploymentResponse { id: deployment.id, status: "pending" })))
 }
 
