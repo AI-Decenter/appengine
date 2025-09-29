@@ -4,11 +4,12 @@ ROOT := $(shell pwd)
 RUST_TOOLCHAIN := 1.90.0
 SQLX_FEATURES := postgres
 DATABASE_URL ?= postgres://aether:postgres@localhost:5432/aether_dev
+TEST_DATABASE_URL ?= postgres://aether:postgres@localhost:5432/aether_test
 PG_CONTAINER_NAME ?= aether-pg-test
 PG_IMAGE ?= postgres:15
 SQLX ?= sqlx
 
-.PHONY: all build fmt lint test clean sqlx-prepare crd
+.PHONY: all build fmt lint test clean sqlx-prepare crd db-start test-no-db test-db
 
 all: build
 
@@ -21,8 +22,29 @@ fmt:
 lint:
 	cargo clippy --workspace --all-targets --all-features -- -D warnings
 
-test:
+test-no-db:
 	cargo test --workspace --all-features -- --nocapture
+
+db-start: ensure-postgres ## Start (or ensure) local Postgres container based on DATABASE_URL
+	@echo "[db-start] Postgres ready at $(DATABASE_URL)"
+
+test: ensure-postgres ## Run full test suite after ensuring Postgres is up
+	DATABASE_URL=$(DATABASE_URL) cargo test --workspace --all-features -- --nocapture
+
+test-db: ensure-postgres ## Initialize dedicated test database and run migrations
+	@echo "[test-db] Using test database URL=$(TEST_DATABASE_URL)"; \
+	if ! command -v psql >/dev/null 2>&1; then echo "[test-db] ERROR: psql not found in PATH"; exit 1; fi; \
+	BASE_URL=$$(echo $(TEST_DATABASE_URL) | sed -E 's#/[^/]+$#/postgres#'); \
+	DB_NAME=$$(echo $(TEST_DATABASE_URL) | sed -E 's#.*/([^/?]+)(\?.*)?$#\1#'); \
+	USER_PART=$$(echo $(TEST_DATABASE_URL) | sed -E 's#postgres://([^:@/]+).*#\1#'); \
+	PASS_PART=$$(echo $(TEST_DATABASE_URL) | sed -nE 's#postgres://[^:]+:([^@]+)@.*#\1#p'); \
+	if [ -n "$$PASS_PART" ]; then export PGPASSWORD="$$PASS_PART"; fi; \
+	echo "[test-db] Ensuring database $$DB_NAME exists..."; \
+	psql "$$BASE_URL" -tc "SELECT 1 FROM pg_database WHERE datname='$$DB_NAME'" | grep -q 1 || psql "$$BASE_URL" -c "CREATE DATABASE $$DB_NAME"; \
+	echo "[test-db] Running migrations (control-plane)..."; \
+	if ! command -v sqlx >/dev/null 2>&1; then cargo install sqlx-cli --no-default-features --features native-tls,postgres >/dev/null; fi; \
+	(cd crates/control-plane && DATABASE_URL=$(TEST_DATABASE_URL) sqlx migrate run >/dev/null); \
+	echo "[test-db] Done. You can now run: DATABASE_URL=$(TEST_DATABASE_URL) cargo test -p control-plane"
 
 clean:
 	cargo clean

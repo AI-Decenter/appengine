@@ -7,6 +7,7 @@ pub mod telemetry;
 pub mod storage;
 pub mod test_support;
 pub mod k8s; // Kubernetes integration (Issue 04)
+pub mod k8s_watch;
 
 // Re-export storage accessor to provide a stable import path even if the module path resolution behaves differently in some build contexts.
 pub use storage::get_storage;
@@ -73,77 +74,48 @@ pub fn build_router(state: AppState) -> Router {
         value["security"] = json!([{"bearer_auth": []}]);
         if let Ok(spec) = serde_json::from_value(value.clone()) { openapi = spec; }
     }
-    // Initialize artifacts_total gauge asynchronously
-    let db_clone = state.db.clone();
-    tokio::spawn(async move { crate::handlers::uploads::init_artifacts_total(&db_clone).await; });
-    // Spawn pending artifact GC loop
-    let db_gc = state.db.clone();
-    tokio::spawn(async move {
-        let ttl = std::env::var("AETHER_PENDING_TTL_SECS").ok().and_then(|v| v.parse::<i64>().ok()).unwrap_or(3600);
-        let interval = std::env::var("AETHER_PENDING_GC_INTERVAL_SECS").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(60);
-        loop {
-            crate::handlers::uploads::run_pending_gc(&db_gc, ttl).await.ok();
-            tokio::time::sleep(std::time::Duration::from_secs(interval.max(5))).await;
-        }
-    });
-    // Phase 3: enhanced k8s deployment status poller (running + failure detection)
-    let db_status = state.db.clone();
-    tokio::spawn(async move {
-        use sqlx::Row;
-        use kube::api::ListParams;
-        use k8s_openapi::api::core::v1::Pod;
-        loop {
-            if let Ok(pending) = sqlx::query("SELECT d.id, a.name, d.artifact_url, d.created_at FROM deployments d JOIN applications a ON a.id = d.app_id WHERE d.status = 'pending' LIMIT 20")
-                .fetch_all(&db_status).await {
-                for row in pending {
-                    let dep_id: uuid::Uuid = row.get("id");
-                    let app_name: String = row.get("name");
-                    let created_at: chrono::DateTime<chrono::Utc> = row.get("created_at");
-                    if let Ok(client) = kube::Client::try_default().await {
-                        let d_api: kube::Api<k8s_openapi::api::apps::v1::Deployment> = kube::Api::namespaced(client.clone(), "default");
-                        match d_api.get(&app_name).await {
-                            Ok(d_obj) => {
-                                let status = d_obj.status.clone();
-                                let available = status.as_ref().and_then(|s| s.available_replicas).unwrap_or(0);
-                                if available >= 1 {
-                                    crate::services::deployments::mark_running(&db_status, dep_id).await;
-                                    tracing::info!(deployment_id=%dep_id, app=%app_name, "deployment running");
-                                    continue;
-                                }
-                                // Failure heuristics
-                                let mut failed_reason: Option<String> = None;
-                                if let Some(st) = status {
-                                    if let Some(conds) = st.conditions {
-                                        for c in conds { if c.type_=="Progressing" && c.status=="False" { failed_reason = Some(c.reason.unwrap_or_else(|| "progress_failed".into())); break; } }
-                                    }
-                                }
-                                // Pod-level inspection for init container failures
-                                if failed_reason.is_none() {
-                                    let p_api: kube::Api<Pod> = kube::Api::namespaced(client.clone(), "default");
-                                    if let Ok(pods) = p_api.list(&ListParams::default().labels(&format!("app={}", app_name))).await {
-                                        'podloop: for p in pods { if let Some(ps) = p.status { if let Some(ics) = ps.init_container_statuses { for ics in ics { if let Some(state) = ics.state { if let Some(term) = state.terminated { if term.exit_code != 0 { failed_reason = Some(format!("init:{}:{}", ics.name, term.reason.unwrap_or_else(|| term.exit_code.to_string()))); break 'podloop; } } } } } } }
-                                    }
-                                }
-                                // Timeout heuristic (>300s)
-                                if failed_reason.is_none() { if chrono::Utc::now().signed_duration_since(created_at).num_seconds() > 300 { failed_reason = Some("timeout".into()); } }
-                                if let Some(rsn) = failed_reason { crate::services::deployments::mark_failed(&db_status, dep_id, &rsn).await; tracing::warn!(deployment_id=%dep_id, app=%app_name, reason=%rsn, "deployment failed"); }
-                            }
-                            Err(kube::Error::Api(ae)) if ae.code == 404 => { /* not created yet */ }
-                            Err(e) => { tracing::warn!(error=%e, app=%app_name, "status poll error"); }
-                        }
-                    }
-                }
+    // Background tasks (can be disabled in tests via AETHER_DISABLE_BACKGROUND=1)
+    if std::env::var("AETHER_DISABLE_BACKGROUND").ok().as_deref() != Some("1") {
+        // Initialize artifacts_total gauge asynchronously
+        let db_clone = state.db.clone();
+        tokio::spawn(async move { crate::handlers::uploads::init_artifacts_total(&db_clone).await; });
+        // Spawn pending artifact GC loop
+        let db_gc = state.db.clone();
+        tokio::spawn(async move {
+            let ttl = std::env::var("AETHER_PENDING_TTL_SECS").ok().and_then(|v| v.parse::<i64>().ok()).unwrap_or(3600);
+            let interval = std::env::var("AETHER_PENDING_GC_INTERVAL_SECS").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(60);
+            loop {
+                crate::handlers::uploads::run_pending_gc(&db_gc, ttl).await.ok();
+                tokio::time::sleep(std::time::Duration::from_secs(interval.max(5))).await;
             }
-            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
-        }
-    });
+        });
+        // Failed deployment GC loop
+        let db_dep_gc = state.db.clone();
+        tokio::spawn(async move {
+            let ttl = std::env::var("AETHER_DEPLOYMENT_FAILED_TTL_SECS").ok().and_then(|v| v.parse::<i64>().ok()).unwrap_or(3600);
+            let interval = std::env::var("AETHER_DEPLOYMENT_FAILED_GC_INTERVAL_SECS").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(300);
+            loop {
+                if let Ok(deleted) = crate::services::deployments::run_failed_deployments_gc(&db_dep_gc, ttl).await { if deleted > 0 { tracing::info!(deleted, "failed_deployments_gc_deleted"); } }
+                tokio::time::sleep(std::time::Duration::from_secs(interval.max(30))).await;
+            }
+        });
+    } else {
+        tracing::info!("background_tasks_disabled");
+    }
+    // Watch-based controller for deployment status (can be disabled for tests via env)
+    if std::env::var("AETHER_DISABLE_WATCH").ok().as_deref() != Some("1") {
+        let db_status = state.db.clone();
+        tokio::spawn(async move {
+            crate::k8s_watch::run_deployment_status_watcher(db_status).await;
+        });
+    }
     Router::new()
         .route("/health", get(health))
     .route("/readyz", get(readiness))
     .route("/startupz", get(handlers::readiness::startupz))
         .route("/metrics", get(metrics_handler))
     .route("/deployments", post(create_deployment).get(list_deployments))
-    .route("/deployments/:id", get(get_deployment))
+    .route("/deployments/:id", get(get_deployment).patch(handlers::deployments::update_deployment))
     .route("/artifacts", post(upload_artifact).get(list_artifacts))
     .route("/artifacts/presign", post(presign_artifact))
     .route("/artifacts/complete", post(complete_artifact))
@@ -171,9 +143,7 @@ mod tests {
 
     #[tokio::test]
     async fn health_ok() {
-    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for tests");
-    let pool = sqlx::postgres::PgPoolOptions::new().max_connections(5).connect(&url).await.unwrap();
-    sqlx::migrate!().run(&pool).await.unwrap();
+    let pool = crate::test_support::test_pool().await;
     let app = build_router(AppState { db: pool });
         let res = app.oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
@@ -185,9 +155,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn create_deployment_201() {
-    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for tests");
-    let pool = sqlx::postgres::PgPoolOptions::new().max_connections(5).connect(&url).await.unwrap();
-    sqlx::migrate!().run(&pool).await.unwrap();
+    let pool = crate::test_support::test_pool().await;
         sqlx::query("DELETE FROM deployments").execute(&pool).await.ok();
         sqlx::query("DELETE FROM applications").execute(&pool).await.ok();
         sqlx::query("INSERT INTO applications (name) VALUES ($1)").bind("app1").execute(&pool).await.unwrap();
@@ -204,9 +172,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn list_apps_empty() {
-    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for tests");
-    let pool = sqlx::postgres::PgPoolOptions::new().max_connections(5).connect(&url).await.unwrap();
-    sqlx::migrate!().run(&pool).await.unwrap();
+    let pool = crate::test_support::test_pool().await;
         sqlx::query("DELETE FROM deployments").execute(&pool).await.ok();
         sqlx::query("DELETE FROM applications").execute(&pool).await.ok();
     let app_router = build_router(AppState { db: pool });
@@ -219,9 +185,7 @@ mod tests {
 
     #[tokio::test]
     async fn app_logs_empty() {
-    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for tests");
-    let pool = sqlx::postgres::PgPoolOptions::new().max_connections(5).connect(&url).await.unwrap();
-    sqlx::migrate!().run(&pool).await.unwrap();
+    let pool = crate::test_support::test_pool().await;
     let app = build_router(AppState { db: pool });
         let res = app.oneshot(Request::builder().uri("/apps/demo/logs").body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
@@ -231,9 +195,7 @@ mod tests {
 
     #[tokio::test]
     async fn readiness_ok() {
-    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for tests");
-    let pool = sqlx::postgres::PgPoolOptions::new().max_connections(5).connect(&url).await.unwrap();
-    sqlx::migrate!().run(&pool).await.unwrap();
+    let pool = crate::test_support::test_pool().await;
     let app = build_router(AppState { db: pool });
         let res = app.oneshot(Request::builder().uri("/readyz").body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
@@ -242,9 +204,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn create_deployment_bad_json() {
-    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for tests");
-    let pool = sqlx::postgres::PgPoolOptions::new().max_connections(5).connect(&url).await.unwrap();
-    sqlx::migrate!().run(&pool).await.unwrap();
+    let pool = crate::test_support::test_pool().await;
     let app_router = build_router(AppState { db: pool });
         let req = Request::builder().method("POST").uri("/deployments")
             .header("content-type","application/json")
@@ -257,9 +217,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn list_deployments_empty() {
-    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for tests");
-    let pool = sqlx::postgres::PgPoolOptions::new().max_connections(5).connect(&url).await.unwrap();
-    sqlx::migrate!().run(&pool).await.unwrap();
+    let pool = crate::test_support::test_pool().await;
         sqlx::query("DELETE FROM deployments").execute(&pool).await.ok();
         sqlx::query("DELETE FROM applications").execute(&pool).await.ok();
     let app_router = build_router(AppState { db: pool });
@@ -273,9 +231,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn app_deployments_flow() {
-    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for tests");
-    let pool = sqlx::postgres::PgPoolOptions::new().max_connections(5).connect(&url).await.unwrap();
-    sqlx::migrate!().run(&pool).await.unwrap();
+    let pool = crate::test_support::test_pool().await;
         sqlx::query("DELETE FROM deployments").execute(&pool).await.ok();
         sqlx::query("DELETE FROM applications").execute(&pool).await.ok();
         sqlx::query("INSERT INTO applications (name) VALUES ($1)").bind("appx").execute(&pool).await.unwrap();
@@ -292,9 +248,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn app_deployments_empty_when_no_deployments() {
-        let url = match std::env::var("DATABASE_URL") { Ok(v) => v, Err(_) => return };
-    let pool = sqlx::postgres::PgPoolOptions::new().max_connections(5).connect(&url).await.unwrap();
-    sqlx::migrate!().run(&pool).await.unwrap();
+    let pool = crate::test_support::test_pool().await;
         // Clean state
         sqlx::query("DELETE FROM deployments").execute(&pool).await.ok();
         sqlx::query("DELETE FROM applications").execute(&pool).await.ok();
@@ -311,9 +265,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn create_app_conflict_error_json() {
-        let url = match std::env::var("DATABASE_URL") { Ok(v) => v, Err(_) => return };
-    let pool = sqlx::postgres::PgPoolOptions::new().max_connections(5).connect(&url).await.unwrap();
-    sqlx::migrate!().run(&pool).await.unwrap();
+    let pool = crate::test_support::test_pool().await;
         sqlx::query("DELETE FROM deployments").execute(&pool).await.ok();
         sqlx::query("DELETE FROM applications").execute(&pool).await.ok();
         sqlx::query("INSERT INTO applications (name) VALUES ($1)").bind("dupe").execute(&pool).await.unwrap();

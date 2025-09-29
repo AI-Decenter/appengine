@@ -1,4 +1,3 @@
-````markdown
 # Issue 04: Kubernetes Deployment Controller (Init + PodSpec)
 
 ## Mục tiêu
@@ -34,12 +33,10 @@ Triển khai artifact thật sự trên Kubernetes sử dụng init container fe
 * DB schema: cột `digest`, `failure_reason`, và bảng `deployment_events`.
 
 ## Next Up
-1. Implement update / redeploy endpoint to change digest and record `rollout` event.
-2. Add watch-based controller (replace polling) using `kube-runtime` for efficiency.
-3. Integration tests with mocked kube (feature flag to bypass real cluster calls).
-4. Expose last transition timestamp in API (extend deployment status response).
-5. Add per-deployment metrics (counters for failed/running) & histogram for time-to-running.
-6. Enhance SHA256 verification with signature (ed25519) gating startup (optional gate).
-7. Garbage collect failed deployments (policy based) if superseded by newer running deployment.
-
-````
+1. Implement update / redeploy endpoint to change digest and record `rollout` event. **DONE**
+2. Add watch-based controller (replace polling) using `kube-runtime` for efficiency. **DONE**
+3. Integration tests with mocked kube (feature flag to bypass real cluster calls). **DONE**
+4. Expose last transition timestamp in API (extend deployment status response). **DONE**
+5. Add per-deployment metrics (counters for failed/running) & histogram for time-to-running. **DONE**
+6. Enhance SHA256 verification with signature (ed25519) gating startup (optional gate). **DONE**
+7. Garbage collect failed deployments (policy based) if superseded by newer running deployment. **DONE**

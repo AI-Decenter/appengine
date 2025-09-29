@@ -298,6 +298,7 @@ Commands:
   verify             Run readiness diagnostics
   clean              Remove ephemeral local service containers
   k8s-start          Ensure microk8s ready + namespace + addons
+  db-start            Ensure Postgres container (same as make db-start)
   deploy-sample APP PATH   Deploy sample Node app (PATH .tar.gz or directory)
   hot-upload APP DIR       Package DIR -> upload to MinIO -> output digest + URL
   hot-patch APP DIGEST     Patch Deployment annotation (aether.dev/digest) to trigger fetch sidecar
@@ -313,7 +314,8 @@ main() {
     verify) verify ;;
     clean) clean ;;
     k8s-start) ensure_microk8s ;;
-    deploy-sample) deploy_sample "$@" ;;
+  db-start) ensure_postgres ;;
+  deploy-sample) deploy_sample "$@" ;;
     hot-upload) hot_upload "$@" ;;
     hot-patch) hot_patch "$@" ;;
     help|--help|-h) help ;;

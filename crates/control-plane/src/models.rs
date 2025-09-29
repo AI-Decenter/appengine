@@ -15,6 +15,8 @@ pub struct Deployment {
 	pub created_at: DateTime<Utc>,
 	pub digest: Option<String>,
 	pub failure_reason: Option<String>,
+	pub last_transition_at: DateTime<Utc>,
+	pub signature: Option<String>,
 }
 
 #[derive(sqlx::FromRow, Serialize, Deserialize, Debug, Clone, ToSchema)]

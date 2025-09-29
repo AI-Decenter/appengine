@@ -14,6 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       RUST_VERSION: 1.90.0
+      COVERAGE_GIST_ID: ${{ secrets.COVERAGE_GIST_ID }}
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust toolchain
@@ -21,6 +22,8 @@ jobs:
         with:
           toolchain: ${{ env.RUST_VERSION }}
           components: llvm-tools-preview
+      - name: Install sccache
+        run: cargo install sccache --locked || true
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -28,7 +31,10 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
+            ~/.cache/sccache
           key: maincov-${{ hashFiles('Cargo.lock') }}
+      - name: Configure sccache env
+        run: echo "RUSTC_WRAPPER=$(which sccache)" >> $GITHUB_ENV
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@v2
         with:
@@ -53,14 +59,27 @@ jobs:
         run: |
           PCT=$(jq '.packages | map(.line_rate) | add / length * 100' coverage-summary.json | awk '{printf("%0.2f", $1)}')
           echo "pct=$PCT" >> $GITHUB_OUTPUT
+      - name: Determine badge color
+        id: badge
+        run: |
+          pct=${{ steps.cov.outputs.pct }}
+          color=yellow
+          gt=$(awk -v p="$pct" 'BEGIN{if (p>85.0) print 1; else print 0}')
+          if [ "$gt" = "1" ]; then color=brightgreen; fi
+          echo "color=$color" >> $GITHUB_OUTPUT
       - name: Create/Update coverage badge
+        if: ${{ env.COVERAGE_GIST_ID != '' }}
         uses: schneegans/dynamic-badges-action@v1.7.0
         with:
           auth: ${{ secrets.GITHUB_TOKEN }}
-          gistID: ${{ secrets.COVERAGE_GIST_ID }}
+          gistID: ${{ env.COVERAGE_GIST_ID }}
           filename: aether-coverage.json
           label: coverage
           message: ${{ steps.cov.outputs.pct }}%
-          color: $( [ $(echo "${{ steps.cov.outputs.pct }} > 85" | bc) -eq 1 ] && echo "brightgreen" || echo "yellow" )
+          color: ${{ steps.badge.outputs.color }}
+      - name: Skip badge (missing COVERAGE_GIST_ID secret)
+        if: ${{ env.COVERAGE_GIST_ID == '' }}
+        run: echo "COVERAGE_GIST_ID secret not set; skipping badge update."
       - name: Print coverage percent
-        run: echo "Coverage: ${{ steps.cov.outputs.pct }}%"
+        run: |
+          echo "Coverage: ${{ steps.cov.outputs.pct }}%"

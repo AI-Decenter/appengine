@@ -38,6 +38,8 @@ jobs:
           key: sqlx-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
       - name: Install sqlx-cli
         run: cargo install sqlx-cli --no-default-features --features native-tls,postgres
+      - name: Install sccache
+        run: cargo install sccache --locked || true
       - name: Run migrations
         working-directory: crates/control-plane
         run: sqlx migrate run
