@@ -38,7 +38,7 @@ async fn build_test_pool(shared: bool) -> Pool<Postgres> {
         }
         // Deduplicate
         candidates.sort(); candidates.dedup();
-        let mut pool_opt = None;
+    let mut pool_opt = None;
         let max_conns: u32 = std::env::var("AETHER_TEST_MAX_CONNS").ok().and_then(|v| v.parse().ok()).unwrap_or(30);
         for cand in &candidates {
             // Proactive readiness loop (helps when docker-compose just started)
@@ -64,8 +64,31 @@ async fn build_test_pool(shared: bool) -> Pool<Postgres> {
         let pool = match pool_opt {
             Some(p) => p,
             None => {
-                eprintln!("[test_pool] All connection candidates failed:\n{}", candidates.join("\n"));
-                panic!("Failed to connect to Postgres (see above candidates). Set TEST DATABASE_URL or start docker compose.");
+                // Attempt embedded Postgres fallback if allowed (default allow). Disable by setting AETHER_DISABLE_EMBEDDED_PG=1
+                if std::env::var("AETHER_DISABLE_EMBEDDED_PG").ok().as_deref() != Some("1") {
+                    eprintln!("[test_pool] No external Postgres reachable. Launching embedded Postgres for tests...");
+                    match launch_embedded_pg().await {
+                        Ok((url, _guard)) => {
+                            // Keep guard alive in static to hold process for test lifetime
+                            use once_cell::sync::OnceCell;
+                            static PG_GUARD: OnceCell<pg_embed::postgres::PgEmbed> = OnceCell::new();
+                            let embed_ref = _guard; // rename
+                            PG_GUARD.set(embed_ref).ok();
+                            // Connect a pool now
+                            let pool = sqlx::postgres::PgPoolOptions::new().max_connections(5).connect(&url).await.expect("embed pg pool");
+                            sqlx::migrate!().run(&pool).await.expect("migrations (embedded)");
+                            pool
+                        }
+                        Err(e) => {
+                            eprintln!("[test_pool] Embedded Postgres launch failed: {e}");
+                            eprintln!("[test_pool] All connection candidates failed:\n{}", candidates.join("\n"));
+                            panic!("Failed to connect to Postgres (external + embedded). Set DATABASE_URL or install local postgres.");
+                        }
+                    }
+                } else {
+                    eprintln!("[test_pool] All connection candidates failed and embedded disabled:\n{}", candidates.join("\n"));
+                    panic!("Failed to connect to Postgres (see above candidates). Set TEST DATABASE_URL or start docker compose.");
+                }
             }
         };
         if shared {
@@ -138,4 +161,36 @@ async fn ensure_database(url: &str) {
             let _ = sqlx::query(&format!("CREATE DATABASE {}", db_name)).execute(&admin_pool).await;
         }
     }
+}
+
+// Launch an embedded Postgres instance on a dynamic port.
+// Returns (database_url, guard) where guard must stay alive.
+async fn launch_embedded_pg() -> anyhow::Result<(String, pg_embed::postgres::PgEmbed)> {
+    use pg_embed::{postgres::{PgEmbed, PgSettings}, pg_enums::PgAuthMethod, pg_fetch::{PgFetchSettings, PG_V15}};
+    use std::path::PathBuf;
+    use sqlx::Connection;
+    let port = portpicker::pick_unused_port().unwrap_or(55432);
+    let target_dir = std::env::var("CARGO_TARGET_DIR").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("target"));
+    let data_dir = target_dir.join("embedded-pg-test");
+    let settings = PgSettings {
+        database_dir: data_dir,
+        port: port as u16,
+        user: "aether".into(),
+        password: "postgres".into(),
+        auth_method: PgAuthMethod::Plain,
+        persistent: true,
+        timeout: Some(std::time::Duration::from_secs(15)),
+        migration_dir: None,
+    };
+    let fetch = PgFetchSettings { version: PG_V15, ..Default::default() };
+    let mut pg = PgEmbed::new(settings, fetch).await?;
+    pg.setup().await?;
+    pg.start_db().await?;
+    // Create the database if not exists
+    let admin_url = format!("{}/postgres", pg.db_uri);
+    let mut admin_conn = sqlx::postgres::PgConnection::connect(&admin_url).await?;
+    let _ = sqlx::query("CREATE DATABASE aether_test").execute(&mut admin_conn).await;
+    let db_url = format!("{}/aether_test", pg.db_uri);
+    eprintln!("[embedded-pg] started at {}", db_url);
+    Ok((db_url, pg))
 }

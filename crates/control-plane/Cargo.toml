@@ -33,6 +33,8 @@ aws-config = { version = "1", optional = true }
 aws-sdk-s3 = { version = "1", optional = true, default-features = true }
 async-trait = "0.1"
 url = "2"
+pg-embed = { version = "0.7", features = ["rt_tokio"] }
+portpicker = "0.1"
 
 [features]
 default = ["s3"]
