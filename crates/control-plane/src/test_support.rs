@@ -7,7 +7,6 @@ use sqlx::{Pool, Postgres};
 static TEST_DB_URL_ENV: &str = "DATABASE_URL";
 // Prefer passwordless default (works with local trust auth); password gets injected from POSTGRES_PASSWORD if set.
 // Match docker-compose / Makefile user/password (aether/postgres)
-static DEFAULT_TEST_DB: &str = "postgres://aether:postgres@localhost:5432/aether_test";
 
 /// Get a test pool. By default each call builds a fresh pool for isolation to avoid
 /// cross-test connection state issues. Set AETHER_TEST_SHARED_POOL=1 to reuse one.
@@ -20,7 +19,7 @@ async fn shared_pool() -> Pool<Postgres> {
         use tokio::sync::OnceCell;
         use sqlx::SqlitePool;
         static SQLITE_POOL: OnceCell<SqlitePool> = OnceCell::const_new();
-        let pool = SQLITE_POOL.get_or_init(|| async {
+    let _sqlite_pool_unused = SQLITE_POOL.get_or_init(|| async {
             let p = SqlitePool::connect("sqlite::memory:").await.expect("sqlite memory");
             // Minimal schema (subset of migrations) for tests touching apps/deployments/artifacts/public_keys
             let schema = r#"
@@ -46,78 +45,35 @@ CREATE TABLE IF NOT EXISTS public_keys (id BLOB PRIMARY KEY DEFAULT (lower(hex(r
 }
 
 async fn build_test_pool(shared: bool) -> Pool<Postgres> {
-    use sqlx::Connection; // for PgConnection::connect
-        let raw_url = std::env::var(TEST_DB_URL_ENV).unwrap_or_else(|_| DEFAULT_TEST_DB.into());
-        let url = normalize_url_with_password(&raw_url);
-        ensure_database(&url).await;
-        let mut candidates: Vec<String> = Vec::new();
-        candidates.push(url.clone());
-        // If URL has password, try variant without (trust auth)
-        if let Ok(parsed) = url::Url::parse(&url) { if parsed.password().is_some() { let mut u = parsed.clone(); let _ = u.set_password(None); candidates.push(u.to_string()); } }
-        // If env POSTGRES_PASSWORD exists and differs, try injecting it
-        if let Ok(pw_env) = std::env::var("POSTGRES_PASSWORD") {
-            if let Ok(mut u) = url::Url::parse(&url) {
-                if u.password() != Some(&pw_env) { let _ = u.set_password(Some(&pw_env)); candidates.push(u.to_string()); }
-            }
+    let max_conns: u32 = std::env::var("AETHER_TEST_MAX_CONNS").ok().and_then(|v| v.parse().ok()).unwrap_or(30);
+    // Strategy: if user explicitly provided DATABASE_URL -> use it (normalized). Else directly start container.
+    let maybe_external = std::env::var(TEST_DB_URL_ENV).ok();
+    let final_url = if let Some(raw) = maybe_external {
+        let url = normalize_url_with_password(&raw);
+        ensure_database(&url).await; url
+    } else {
+        if std::env::var("AETHER_DISABLE_TESTCONTAINERS").ok().as_deref()==Some("1") {
+            panic!("DATABASE_URL not set and testcontainers disabled (AETHER_DISABLE_TESTCONTAINERS=1)");
         }
-        // Deduplicate
-        candidates.sort(); candidates.dedup();
-    let mut pool_opt = None;
-        let max_conns: u32 = std::env::var("AETHER_TEST_MAX_CONNS").ok().and_then(|v| v.parse().ok()).unwrap_or(30);
-        for cand in &candidates {
-            // Proactive readiness loop (helps when docker-compose just started)
-            let retries: u32 = std::env::var("AETHER_TEST_DB_RETRIES").ok().and_then(|v| v.parse().ok()).unwrap_or(12); // ~12 * 250ms = 3s default
-            let delay_ms: u64 = std::env::var("AETHER_TEST_DB_RETRY_DELAY_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(250);
-            for attempt in 0..=retries {
-                match sqlx::postgres::PgConnection::connect(cand) .await {
-                    Ok(mut conn) => { let _ = sqlx::query("SELECT 1").execute(&mut conn).await; break; }
-                    Err(e) => {
-                        if attempt==retries { eprintln!("[test_pool] readiness failed for {cand}: {e}"); }
-                        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-                    }
-                }
-            }
-            // Build pool with tighter acquisition timeout (surface issues fast in tests)
-            let mut opts = sqlx::postgres::PgPoolOptions::new();
-            opts = opts.max_connections(max_conns)
-                .acquire_timeout(std::time::Duration::from_secs(
-                    std::env::var("AETHER_TEST_DB_ACQUIRE_TIMEOUT_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(8)
-                ));
-            if let Ok(pool) = opts.connect(cand).await { pool_opt = Some(pool); break; }
+        match start_testcontainer_postgres().await {
+            Ok(u)=> { eprintln!("[test_pool] started testcontainer {u}"); u },
+            Err(e)=> panic!("Failed starting Postgres testcontainer: {e}"),
         }
-        let pool = match pool_opt {
-            Some(p) => p,
-            None => {
-                // Fallback: start a Postgres test container (requires Docker). Can be disabled via AETHER_DISABLE_TESTCONTAINERS=1
-                if std::env::var("AETHER_DISABLE_TESTCONTAINERS").ok().as_deref()==Some("1") {
-                    eprintln!("[test_pool] All connection candidates failed and testcontainers disabled. Candidates: \n{}", candidates.join("\n"));
-                    panic!("No Postgres available for tests and testcontainers disabled");
-                }
-                match start_testcontainer_postgres().await {
-                    Ok(url) => {
-                        eprintln!("[test_pool] Started Postgres testcontainer at {url}");
-                        let pool = sqlx::postgres::PgPoolOptions::new().max_connections(5).connect(&url).await.expect("testcontainer pg pool");
-                        sqlx::migrate!().run(&pool).await.expect("migrations (testcontainer)");
-                        pool
-                    }
-                    Err(e) => {
-                        eprintln!("[test_pool] Failed to start Postgres testcontainer: {e}");
-                        eprintln!("[test_pool] Candidates attempted: \n{}", candidates.join("\n"));
-                        panic!("Failed to provision Postgres for tests");
-                    }
-                }
-            }
-        };
-        if shared {
-            static FIRST_LOG: std::sync::Once = std::sync::Once::new();
-            FIRST_LOG.call_once(|| {
-                eprintln!("Using shared test pool (url={})", sanitize_url(&url));
-            });
-        } else {
-            eprintln!("Using per-test pool (url={})", sanitize_url(&url));
-        }
-        sqlx::migrate!().run(&pool).await.expect("migrations");
-        pool
+    };
+    let mut opts = sqlx::postgres::PgPoolOptions::new();
+    opts = opts.max_connections(max_conns)
+        .acquire_timeout(std::time::Duration::from_secs(
+            std::env::var("AETHER_TEST_DB_ACQUIRE_TIMEOUT_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(8)
+        ));
+    let pool = opts.connect(&final_url).await.expect("connect test db");
+    if shared {
+        static FIRST: std::sync::Once = std::sync::Once::new();
+        FIRST.call_once(|| eprintln!("Using shared test pool (url={})", sanitize_url(&final_url)));
+    } else {
+        eprintln!("Using per-test pool (url={})", sanitize_url(&final_url));
+    }
+    sqlx::migrate!().run(&pool).await.expect("migrations");
+    pool
 }
 /// Normalize a postgres connection URL by injecting a password from POSTGRES_PASSWORD
 /// if the URL omits one (e.g. postgres://user@host/db) and POSTGRES_PASSWORD is set.
@@ -205,12 +161,12 @@ async fn start_testcontainer_postgres() -> anyhow::Result<String> {
     let base_url = format!("postgres://aether:postgres@{}:{}/", host, port);
     // Poll for readiness
     let admin_url = format!("{}postgres", base_url);
-    for attempt in 0..30u32 { // up to ~30s
+    for attempt in 0..60u32 { // up to ~15s (60 * 250ms)
         match sqlx::postgres::PgConnection::connect(&admin_url).await {
             Ok(mut c) => { let _ = sqlx::query("SELECT 1").execute(&mut c).await; break; }
             Err(e) => {
-                if attempt == 29 { return Err(anyhow::anyhow!("postgres testcontainer not ready after retries: {e}")); }
-                tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+                if attempt == 59 { return Err(anyhow::anyhow!("postgres testcontainer not ready after retries: {e}")); }
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
             }
         }
     }

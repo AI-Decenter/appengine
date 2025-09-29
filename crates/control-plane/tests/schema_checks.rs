@@ -17,7 +17,7 @@ async fn schema_core_tables_exist() {
     let url = match std::env::var("DATABASE_URL") { Ok(v)=>v, Err(_)=> {
         // Fallback: spin up testcontainer via shared harness
         eprintln!("[schema_checks] DATABASE_URL missing; starting testcontainer Postgres via test_support");
-        let pool = control_plane::test_support::test_pool().await; // triggers container + migrations
+    let _pool = control_plane::test_support::test_pool().await; // triggers container + migrations
         // Retrieve URL from pool options via PgPoolOptions debug (not directly accessible). Instead just reuse env var now set by harness.
         std::env::var("DATABASE_URL").expect("harness should set DATABASE_URL")
     } };

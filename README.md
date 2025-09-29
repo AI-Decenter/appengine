@@ -398,6 +398,21 @@ Detailed procedures are specified in `DEVELOPMENT.md`. A provisioning and verifi
 Quick Start:
 1. Ensure Linux host with Docker (and optionally Snap if using MicroK8s).
 2. Option A (script): `./dev.sh bootstrap`
+
+### 10.1 Test Database Strategy (PostgreSQL)
+
+Integration & migration tests now use a Docker ephemeral Postgres (via `testcontainers`) by default when `DATABASE_URL` is not set. This replaces the previous `pg-embed` binary extraction approach (which was fragile in CI with cached/corrupt archives). Behavior:
+
+* If `DATABASE_URL` is defined, tests connect directly (database auto-created if absent).
+* Else a container `postgres:15-alpine` is started once per test process; a database `aether_test` is created and migrations applied.
+* Environment variables:
+	* `AETHER_TEST_SHARED_POOL=1` – reuse a single connection pool across tests.
+	* `AETHER_DISABLE_TESTCONTAINERS=1` – force failure if no `DATABASE_URL` (debug / hard fail mode).
+	* `AETHER_TEST_PG_IMAGE=postgres:16-alpine` – override image.
+* The harness exports `DATABASE_URL` after container startup so tests that expect it (e.g. schema checks) transparently work.
+* First run pays the image pull cost; subsequent runs are typically <10s for schema tests (previously ~56s with fallback retries).
+
+Rationale: deterministic startup, less custom retry logic, smaller maintenance surface vs. embedded binaries.
 3. Option B (docker-compose):
 	```bash
 	docker compose up -d postgres minio

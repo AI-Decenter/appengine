@@ -36,12 +36,14 @@ Implemented Issue 05 foundations:
 5. Unit test xác minh sidecar & annotation.
 6. Checksum verification + configurable interval trong loop.
 7. Structured log markers + metrics definitions + ingestion wiring (log tail watcher) + latency capture (ms -> histogram seconds).
+	* Ghi chú: module ingestion hiện được feature-gate bằng `dev-hot-ingest` (mặc định OFF) để tránh tác động độ ổn định test; bật bằng `--features dev-hot-ingest` khi chạy control-plane.
 
 ## Giới hạn hiện tại
 - Chưa có graceful reload (node process không tự restart/nodemon). Sau khi file hệ thống đổi, NodeJS không reload trừ khi code có cơ chế riêng hoặc ta dùng `nodemon` image.
 - Sidecar đang grep JSON thô (simplistic); nên thay bằng jq nhỏ gọn hoặc một tiny Rust helper binary để tránh parsing fragile.
 - Không có backoff jitter / exponential delay.
-- Metrics ingestion implemented (log tail). Remaining: resilience across pod restarts & multi-namespace support.
+- Metrics ingestion implemented (log tail). Remaining: resilience across pod restarts & multi-namespace support. (Hiện disabled by default qua feature flag.)
+- Hạ tầng test Postgres đã chuyển sang Docker testcontainers (README 10.1); không ảnh hưởng trực tiếp nhưng cải thiện tốc độ và tính ổn định khi chạy suite với dev-hot flag.
 
 ## Next-Up / Future Enhancements
 1. Add graceful reload: đổi image `aether-nodejs:20-slim` -> layer cài `nodemon` và start `nodemon --watch /workspace server.js`.
