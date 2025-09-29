@@ -171,7 +171,7 @@ mod tests {
 
     #[tokio::test]
     async fn health_ok() {
-        let url = match std::env::var("DATABASE_URL") { Ok(v) => v, Err(_) => return }; // skip if not set
+    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for tests");
     let pool = sqlx::postgres::PgPoolOptions::new().max_connections(5).connect(&url).await.unwrap();
     sqlx::migrate!().run(&pool).await.unwrap();
     let app = build_router(AppState { db: pool });
@@ -185,7 +185,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn create_deployment_201() {
-        let url = match std::env::var("DATABASE_URL") { Ok(v) => v, Err(_) => return };
+    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for tests");
     let pool = sqlx::postgres::PgPoolOptions::new().max_connections(5).connect(&url).await.unwrap();
     sqlx::migrate!().run(&pool).await.unwrap();
         sqlx::query("DELETE FROM deployments").execute(&pool).await.ok();
@@ -204,7 +204,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn list_apps_empty() {
-        let url = match std::env::var("DATABASE_URL") { Ok(v) => v, Err(_) => return };
+    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for tests");
     let pool = sqlx::postgres::PgPoolOptions::new().max_connections(5).connect(&url).await.unwrap();
     sqlx::migrate!().run(&pool).await.unwrap();
         sqlx::query("DELETE FROM deployments").execute(&pool).await.ok();
@@ -219,7 +219,7 @@ mod tests {
 
     #[tokio::test]
     async fn app_logs_empty() {
-        let url = match std::env::var("DATABASE_URL") { Ok(v) => v, Err(_) => return };
+    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for tests");
     let pool = sqlx::postgres::PgPoolOptions::new().max_connections(5).connect(&url).await.unwrap();
     sqlx::migrate!().run(&pool).await.unwrap();
     let app = build_router(AppState { db: pool });
@@ -231,7 +231,7 @@ mod tests {
 
     #[tokio::test]
     async fn readiness_ok() {
-        let url = match std::env::var("DATABASE_URL") { Ok(v) => v, Err(_) => return };
+    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for tests");
     let pool = sqlx::postgres::PgPoolOptions::new().max_connections(5).connect(&url).await.unwrap();
     sqlx::migrate!().run(&pool).await.unwrap();
     let app = build_router(AppState { db: pool });
@@ -242,7 +242,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn create_deployment_bad_json() {
-        let url = match std::env::var("DATABASE_URL") { Ok(v) => v, Err(_) => return };
+    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for tests");
     let pool = sqlx::postgres::PgPoolOptions::new().max_connections(5).connect(&url).await.unwrap();
     sqlx::migrate!().run(&pool).await.unwrap();
     let app_router = build_router(AppState { db: pool });
@@ -257,7 +257,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn list_deployments_empty() {
-        let url = match std::env::var("DATABASE_URL") { Ok(v) => v, Err(_) => return };
+    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for tests");
     let pool = sqlx::postgres::PgPoolOptions::new().max_connections(5).connect(&url).await.unwrap();
     sqlx::migrate!().run(&pool).await.unwrap();
         sqlx::query("DELETE FROM deployments").execute(&pool).await.ok();
@@ -273,7 +273,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn app_deployments_flow() {
-        let url = match std::env::var("DATABASE_URL") { Ok(v) => v, Err(_) => return };
+    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for tests");
     let pool = sqlx::postgres::PgPoolOptions::new().max_connections(5).connect(&url).await.unwrap();
     sqlx::migrate!().run(&pool).await.unwrap();
         sqlx::query("DELETE FROM deployments").execute(&pool).await.ok();

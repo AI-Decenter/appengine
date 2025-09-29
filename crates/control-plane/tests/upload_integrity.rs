@@ -16,6 +16,7 @@ fn init_tracing() {
     });
 }
 
+
 // Mandatory pool (fail fast if DATABASE_URL missing or unreachable) and run migrations each call.
 async fn pool() -> sqlx::Pool<sqlx::Postgres> {
     init_tracing();
