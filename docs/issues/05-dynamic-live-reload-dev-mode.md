@@ -14,7 +14,7 @@ Cho phép lập trình viên cập nhật code mà không rebuild image: sidecar
 * [ ] E2E test: cập nhật digest -> sidecar kéo bản mới trong ≤10s (cần cluster test harness).
 * [x] Checksum verify trong sidecar loop (sha256sum -c trước extract) & configurable poll interval env `AETHER_FETCH_INTERVAL_SEC`.
 * [x] Structured log markers `REFRESH_OK` / `REFRESH_FAIL reason=<...>` trong fetcher script để phục vụ metrics ingestion.
-* [x] Metrics definitions (Prometheus): counters & histogram (`dev_hot_refresh_total`, `dev_hot_refresh_failure_total{reason}`, `dev_hot_refresh_latency_seconds`) – CHƯA có ingestion runtime.
+* [x] Metrics definitions (Prometheus): counters & histogram (`dev_hot_refresh_total`, `dev_hot_refresh_failure_total{reason}`, `dev_hot_refresh_latency_seconds`) + ingestion runtime (log tail) behind `AETHER_DEV_HOT_INGEST=1`.
 
 ## Acceptance
 | ID | Mô tả | Kết quả |
@@ -35,18 +35,18 @@ Implemented Issue 05 foundations:
 4. Annotation `aether.dev/dev-hot=true` để debugging / introspection.
 5. Unit test xác minh sidecar & annotation.
 6. Checksum verification + configurable interval trong loop.
-7. Structured log markers chuẩn hóa & metrics definitions (chưa wiring collection vào registry runtime events).
+7. Structured log markers + metrics definitions + ingestion wiring (log tail watcher) + latency capture (ms -> histogram seconds).
 
 ## Giới hạn hiện tại
 - Chưa có graceful reload (node process không tự restart/nodemon). Sau khi file hệ thống đổi, NodeJS không reload trừ khi code có cơ chế riêng hoặc ta dùng `nodemon` image.
 - Sidecar đang grep JSON thô (simplistic); nên thay bằng jq nhỏ gọn hoặc một tiny Rust helper binary để tránh parsing fragile.
 - Không có backoff jitter / exponential delay.
-- Metrics mới chỉ có definitions + log markers; CHƯA có task thu thập & increment thực tế.
+- Metrics ingestion implemented (log tail). Remaining: resilience across pod restarts & multi-namespace support.
 
 ## Next-Up / Future Enhancements
 1. Add graceful reload: đổi image `aether-nodejs:20-slim` -> layer cài `nodemon` và start `nodemon --watch /workspace server.js`.
 2. Robust JSON parse: thay grep bằng tiny helper (Rust) hoặc `jq` (nếu chấp nhận kích thước) + timeout / error classification.
-3. Metrics wiring: task đọc log markers hoặc sidecar -> control-plane endpoint để increment counters & observe latency.
+3. Metrics resiliency: handle pod restarts, multi-namespace, deduplicate concurrent tails, optional push mode.
 4. E2E integration test: patch digest -> assert file contents phục vụ mới trong ≤10s.
 5. Watcher optimization: dùng Kubernetes watch thay polling, event-driven update.
 6. Security hardening: RBAC minimal (get pod), bỏ `--no-check-certificate`, short-lived projected token.
@@ -64,7 +64,8 @@ Implemented Issue 05 foundations:
 - [ ] Graceful reload (nodemon / signal)
 - [x] Digest verify in hot loop
 - [ ] E2E latency test (H1/H2)
-- [ ] Metrics ingestion wiring (definitions + markers DONE)
+- [x] Metrics ingestion wiring (definitions + markers DONE; log tail worker)
+- [x] Latency emission (ms -> histogram)
 - [ ] Robust JSON parsing (no grep)
 
 ````

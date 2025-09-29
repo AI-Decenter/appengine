@@ -35,6 +35,9 @@ async-trait = "0.1"
 url = "2"
 pg-embed = { version = "0.7", features = ["rt_tokio"] }
 portpicker = "0.1"
+regex = "1"
+fastrand = "2"
+fxhash = "0.2"
 
 [features]
 default = ["s3"]
@@ -42,6 +45,7 @@ s3 = ["aws-config", "aws-sdk-s3"]
 # Enable lightweight in-memory SQLite for tests (skips S3 specific behavior where not needed).
 sqlite-test = []
 mock-kube = []
+dev-hot-ingest = []
 
 [dev-dependencies]
 proptest = "1"

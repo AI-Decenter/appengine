@@ -16,6 +16,10 @@ pub async fn apply_deployment(app: &str, digest: &str, artifact_url: &str, names
 /// Strategy: name = app name, annotation carries digest for idempotency / change triggers.
 #[cfg(not(feature = "mock-kube"))]
 pub async fn apply_deployment(app: &str, digest: &str, artifact_url: &str, namespace: &str, signature: Option<&str>, dev_hot: bool) -> Result<()> {
+    if std::env::var("AETHER_DISABLE_K8S").unwrap_or_default() == "1" {
+        tracing::info!(app, "AETHER_DISABLE_K8S=1 skipping real kube apply");
+        return Ok(());
+    }
     let client = Client::try_default().await?;
     let api: Api<Deployment> = Api::namespaced(client, namespace);
     let name = app;
@@ -59,8 +63,8 @@ fn build_deployment_manifest(app: &str, digest: &str, artifact_url: &str, namesp
     let (init_containers, containers) = if dev_hot {
                 let fetch_script = r#"set -euo pipefail
 # Standardized dev-hot log markers for external metrics tailing:
-# REFRESH_OK app=<pod> digest=<digest>
-# REFRESH_FAIL app=<pod> reason=<reason>
+# REFRESH_OK app=<pod> digest=<digest> ms=<duration_ms>
+# REFRESH_FAIL app=<pod> reason=<reason> ms=<duration_ms>
 API="https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}"
 TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
 NS=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace)
@@ -77,16 +81,20 @@ while true; do
             echo "[fetcher] digest $DIGEST detected but artifact URL empty"; sleep "$INTERVAL"; continue;
         fi
         echo "[fetcher] New digest $DIGEST -> fetching artifact $ART"
+        START_MS=$(date +%s%3N || date +%s000)
         if wget -q -O /workspace/app.tar.gz "$ART"; then
             if echo "$DIGEST  /workspace/app.tar.gz" | sha256sum -c - >/dev/null 2>&1; then
                 tar -xzf /workspace/app.tar.gz -C /workspace || { echo "[fetcher] extract failed"; sleep "$INTERVAL"; continue; }
                 CUR="$DIGEST"
-                echo "[fetcher] updated to $DIGEST"; echo "REFRESH_OK app=$POD digest=$DIGEST"
+                END_MS=$(date +%s%3N || date +%s000); DUR=$((END_MS-START_MS))
+                echo "[fetcher] updated to $DIGEST (took ${DUR}ms)"; echo "REFRESH_OK app=$POD digest=$DIGEST ms=$DUR"
             else
-                echo "[fetcher] checksum mismatch for $ART (expected $DIGEST)"; echo "REFRESH_FAIL app=$POD reason=checksum";
+                END_MS=$(date +%s%3N || date +%s000); DUR=$((END_MS-START_MS))
+                echo "[fetcher] checksum mismatch for $ART (expected $DIGEST)"; echo "REFRESH_FAIL app=$POD reason=checksum ms=$DUR";
             fi
         else
-            echo "[fetcher] download failed for $ART"; echo "REFRESH_FAIL app=$POD reason=download";
+            END_MS=$(date +%s%3N || date +%s000); DUR=$((END_MS-START_MS))
+            echo "[fetcher] download failed for $ART"; echo "REFRESH_FAIL app=$POD reason=download ms=$DUR";
         fi
     fi
     sleep "$INTERVAL"

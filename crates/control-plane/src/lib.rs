@@ -8,6 +8,8 @@ pub mod storage;
 pub mod test_support;
 pub mod k8s; // Kubernetes integration (Issue 04)
 pub mod k8s_watch;
+#[cfg(feature = "dev-hot-ingest")]
+pub mod dev_hot_ingest; // New module for hot ingest development (feature-gated)
 
 // Re-export storage accessor to provide a stable import path even if the module path resolution behaves differently in some build contexts.
 pub use storage::get_storage;

@@ -1,5 +1,7 @@
 //! Binary entrypoint for the Control Plane service.
 use control_plane::{db::init_db, build_router, AppState};
+#[cfg(feature = "dev-hot-ingest")]
+use control_plane::dev_hot_ingest::spawn_dev_hot_log_ingestion;
 use tracing::info;
 use std::net::SocketAddr;
 use axum::{http::{Request, HeaderValue}, middleware::{self, Next}, response::Response, body::Body};
@@ -18,6 +20,9 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|_| "postgres://aether:postgres@localhost:5432/aether_dev".to_string());
     let db_pool = init_db(&database_url).await.expect("database must be available");
     let state = AppState { db: db_pool };
+    // Spawn dev-hot ingestion (optional via env AETHER_DEV_HOT_INGEST=1)
+    #[cfg(feature = "dev-hot-ingest")]
+    if let Err(e) = spawn_dev_hot_log_ingestion().await { tracing::warn!(error=%e, "failed to spawn dev-hot ingestion"); }
     let rate_limit_enabled = std::env::var("AETHER_RATE_LIMIT").unwrap_or_default() == "1";
     // Support multiple tokens via CSV env AETHER_API_TOKENS; keep backward compat with single AETHER_API_TOKEN
     let auth_tokens: Vec<String> = if let Ok(list) = std::env::var("AETHER_API_TOKENS") {
