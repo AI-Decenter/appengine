@@ -1,5 +1,15 @@
 # AetherEngine (MVP v1.0)
 
+![CI (Main)](https://github.com/askerNQK/appengine/actions/workflows/ci.yml/badge.svg)
+![Feature CI](https://github.com/askerNQK/appengine/actions/workflows/feature-ci.yml/badge.svg)
+![Coverage](https://img.shields.io/badge/coverage-internal--lcov-lightgrey)
+<!-- Coverage badge is placeholder; replace with dynamic source (Codecov / shields endpoint) later. -->
+
+> Platform Test Matrix: Linux (Ubuntu) + macOS
+> * Linux: Full workspace (including Control Plane DB tests, migrations, schema drift, coverage, performance)
+> * macOS: Full workspace including Control Plane (PostgreSQL 15 via Homebrew service)
+> This ensures cross-platform parity for the CLI, operator, and control-plane.
+
 An internal Platform-as-a-Service (PaaS) designed to minimize application deployment latency and systematically elevate Developer Experience (DX) by transferring the entirety of the build pipeline (dependency resolution, compilation, packaging) to the client edge through a high‑performance Rust CLI. Rather than executing non‑deterministic server‑side builds, developers upload a pre‑assembled, production‑ready artifact. This model is intended to reduce end‑to‑end deployment latency from minutes to seconds while decreasing infrastructure consumption and variance.
 
 ---
@@ -62,6 +72,66 @@ Planned Enhancements:
 * Local SBOM generation (supply chain visibility)
 * Integrity verification before runtime entrypoint execution
 
+### 3.1 Usage Quick Reference
+
+```
+$ aether --help
+Global Flags:
+	--log-level <trace|debug|info|warn|error> (default: info)
+	--log-format <auto|text|json> (default: auto)
+
+Subcommands:
+	login [--username <name>]            Authenticate (mock)
+	deploy [--dry-run]                   Package and (mock) deploy current project
+	logs [--app <name>]                  Show recent logs (mock)
+	list                                 List applications (mock)
+	completions --shell <bash|zsh|fish>  Generate shell completion script (hidden)
+```
+
+Examples:
+```
+aether login
+aether deploy --dry-run
+aether deploy
+aether --log-format json list
+aether completions --shell bash > aether.bash
+aether deploy --format json --no-sbom --pack-only
+```
+
+Configuration:
+* Config file: `${XDG_CONFIG_HOME:-~/.config}/aether/config.toml`
+* Session file: `${XDG_CACHE_HOME:-~/.cache}/aether/session.json`
+* Env override: `AETHER_DEFAULT_NAMESPACE`
+* Ignore file: `.aetherignore` (glob patterns, one per line, # comments)
+
+Exit Codes:
+| Code | Meaning |
+|------|---------|
+| 0 | Success |
+| 2 | Usage / argument error (clap) |
+| 10 | Config error |
+| 20 | Runtime internal |
+| 30 | I/O error |
+| 40 | Network error (reserved) |
+
+Performance:
+Target cold start <150ms (local); CI threshold set to <800ms for noise tolerance.
+
+### 3.2 Deploy JSON Output
+
+When invoking `aether deploy --format json`, the CLI prints a single JSON object to stdout (logs remain on stderr) with the following stable fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `artifact` | string | Path to generated `.tar.gz` artifact |
+| `digest` | string (hex sha256) | Content hash of packaged files (streaming computed) |
+| `size_bytes` | number | Size of artifact on disk |
+| `manifest` | string | Path to manifest file listing per‑file hashes |
+| `sbom` | string|null | Path to SBOM (`.sbom.json`) or null when `--no-sbom` supplied |
+| `signature` | string|null | Path to signature file when `AETHER_SIGNING_KEY` provided |
+
+Error Behavior (JSON mode): currently non‑zero failures may still emit human readable text before JSON; future work will standardize an error envelope `{ "error": { code, message } }` (tracked in Issue 01 follow-up – now resolved in this branch by suppressing SBOM generation when skipped).
+
 ---
 
 ## 4. Control Plane
@@ -76,7 +146,89 @@ Representative Endpoints (MVP subset):
 * `POST /deployments` – Register new deployment (idempotent via artifact digest)
 * `GET /apps/{app}/logs` – Stream or tail logs (upgrade: WebSocket or chunked HTTP)
 * `GET /apps/{app}/deployments` – List historical deployments
+* `POST /artifacts` – Upload artifact (headers: `X-Aether-Artifact-Digest`, optional `X-Aether-Signature`)
+* `GET /artifacts` – List recent artifacts (metadata only)
 * `GET /healthz`, `GET /readyz` – Liveness / readiness probes
+
+### 4.1 Error Format
+All API errors return a stable JSON envelope and appropriate HTTP status code:
+
+```
+HTTP/1.1 409 Conflict
+Content-Type: application/json
+
+{
+	"code": "conflict",
+	"message": "application name exists"
+}
+```
+
+Canonical error codes (subject to extension):
+| Code | HTTP | Semantics |
+|------|------|-----------|
+| `bad_request` | 400 | Payload / validation failure |
+| `not_found` | 404 | Entity does not exist |
+| `conflict` | 409 | Uniqueness or state conflict |
+| `service_unavailable` | 503 | Dependency (DB, downstream) not ready |
+| `internal` | 500 | Unclassified unexpected error |
+
+Design Notes:
+* Machine-friendly `code` enables future localization / client mapping.
+* `message` intentionally human oriented; avoid leaking internal stack traces.
+* Additional diagnostic fields (e.g. `details`, `trace_id`) may be added when tracing is wired.
+* Non-error (2xx) responses never include this envelope.
+
+### 4.2 Artifact Upload JSON Fields
+
+On success (`200 OK`) the control plane returns:
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `artifact_url` | string | Location reference (currently file URI mock) |
+| `digest` | string | SHA-256 hex digest (server recomputed) |
+| `duplicate` | bool | True if digest already existed (idempotent; file not re-written) |
+| `app_linked` | bool | True if `app_name` matched an existing application and was linked |
+| `verified` | bool | True if an attached Ed25519 signature matched a registered application public key |
+
+Additional error codes related to artifact upload:
+| Code | HTTP | Semantics |
+|------|------|-----------|
+| `missing_digest` | 400 | Header `X-Aether-Artifact-Digest` absent |
+| `invalid_digest` | 400 | Malformed digest (length/hex) |
+| `digest_mismatch` | 400 | Provided digest did not match recomputed |
+
+### 4.3 Artifact Public Keys (Signature Verification)
+
+Register an Ed25519 public key for an application so subsequent uploads with header `X-Aether-Signature` over the digest value set `verified=true`.
+
+Endpoint:
+`POST /apps/{app_name}/public-keys`
+```
+{ "public_key_hex": "<64 hex chars>" }
+```
+Response `201 Created`:
+```
+{ "app_id": "<uuid>", "public_key_hex": "<hex>", "active": true }
+```
+
+Multiple keys per app are allowed (all `active=true` by default). Deactivation endpoint TBD.
+
+### 4.4 Artifact Existence Fast Path
+`HEAD /artifacts/{digest}` returns `200` if present, `404` if absent (no body). Enables the CLI to skip re‑uploads.
+
+### 4.5 Concurrency & Backpressure
+Uploads are limited by a semaphore (env: `AETHER_MAX_CONCURRENT_UPLOADS`, default `32`). Excess uploads await a permit, preventing resource exhaustion.
+
+### 4.6 Metrics (Prometheus)
+| Metric | Type | Description |
+|--------|------|-------------|
+| `artifact_upload_bytes_total` | Counter | Bytes successfully persisted (new uploads) |
+| `artifact_upload_duration_seconds` | Histogram | End-to-end upload + verify duration |
+| `artifact_uploads_in_progress` | Gauge | Concurrent in-flight uploads |
+| `artifacts_total` | Gauge | Total stored artifacts (initial load + increment on insert) |
+
+### 4.7 Security Scheme
+Bearer token auth (`Authorization: Bearer <token>`) configured via `AETHER_API_TOKENS` (CSV) or fallback `AETHER_API_TOKEN`. OpenAPI spec exposes a `bearer_auth` security scheme applied globally.
 
 ---
 

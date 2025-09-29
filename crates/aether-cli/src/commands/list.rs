@@ -1,0 +1,1 @@
+use anyhow::Result;use tracing::info;pub async fn handle() -> Result<()> { info!(event="list.header", header="APPLICATION   STATUS   AGE"); info!(event="list.entry", app="example", status="Running", age="5m"); Ok(()) }

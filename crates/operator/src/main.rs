@@ -1,6 +1,5 @@
 use kube::Client;
 use tracing::info;
-use aether_operator::*;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
