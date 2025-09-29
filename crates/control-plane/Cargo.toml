@@ -33,6 +33,8 @@ async-trait = "0.1"
 [features]
 default = ["s3"]
 s3 = ["aws-config", "aws-sdk-s3"]
+# Enable lightweight in-memory SQLite for tests (skips S3 specific behavior where not needed).
+sqlite-test = []
 
 [dev-dependencies]
 proptest = "1"
