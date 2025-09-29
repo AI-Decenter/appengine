@@ -6,6 +6,7 @@ pub mod services;
 pub mod telemetry;
 pub mod storage;
 pub mod test_support;
+pub mod k8s; // Kubernetes integration (Issue 04)
 
 // Re-export storage accessor to provide a stable import path even if the module path resolution behaves differently in some build contexts.
 pub use storage::get_storage;
