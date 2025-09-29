@@ -13,6 +13,9 @@ use crate::errors::{CliError, CliErrorKind};
 use serde::{Serialize,Deserialize};
 use std::io::Read;
 use tokio_util::io::ReaderStream;
+use indicatif::{ProgressBar, ProgressStyle};
+use std::time::Instant;
+use atty;
 
 #[derive(Debug, Clone, Copy)]
 enum PackageManager { Npm, Yarn, Pnpm }
@@ -37,10 +40,11 @@ pub struct DeployOptions {
     pub no_cache: bool,
     pub no_sbom: bool,
     pub format: Option<String>,
+    pub use_legacy_upload: bool,
 }
 
 pub async fn handle(opts: DeployOptions) -> Result<()> {
-    let DeployOptions { dry_run, pack_only, compression_level, out, no_upload, no_cache, no_sbom, format } = opts;
+    let DeployOptions { dry_run, pack_only, compression_level, out, no_upload, no_cache, no_sbom, format, use_legacy_upload } = opts;
     let root = Path::new(".");
     if !is_node_project(root) { return Err(CliError::new(CliErrorKind::Usage("not a NodeJS project (missing package.json)".into())).into()); }
     if dry_run { info!(event="deploy.dry_run", msg="Would run install + prune + package project"); return Ok(()); }
@@ -92,9 +96,10 @@ pub async fn handle(opts: DeployOptions) -> Result<()> {
 
     if !no_upload {
         if let Ok(base) = std::env::var("AETHER_API_BASE") {
-            match real_upload(&artifact_name, root, &base, &digest, sig_path.exists().then(|| sig_path.clone())).await {
-                Ok(url)=> info!(event="deploy.upload", base=%base, artifact=%artifact_name.display(), status="ok", returned_url=%url),
-                Err(e)=> info!(event="deploy.upload", base=%base, artifact=%artifact_name.display(), status="error", err=%e)
+            let upload_res = if use_legacy_upload { legacy_upload(&artifact_name, root, &base, &digest, sig_path.exists().then(|| sig_path.clone())).await } else { two_phase_upload(&artifact_name, root, &base, &digest, sig_path.exists().then(|| sig_path.clone())).await };
+            match upload_res {
+                Ok(url)=> info!(event="deploy.upload", mode= if use_legacy_upload {"legacy"} else {"two_phase"}, base=%base, artifact=%artifact_name.display(), status="ok", returned_url=%url),
+                Err(e)=> { return Err(e); }
             }
         } else { info!(event="deploy.upload", status="skipped_missing_env"); }
     } else { info!(event="deploy.upload", status="disabled_by_flag"); }
@@ -321,7 +326,7 @@ fn maybe_sign(artifact:&Path, digest:&str) -> Result<()> {
     Ok(())
 }
 
-async fn real_upload(artifact:&Path, root:&Path, base:&str, digest:&str, sig: Option<PathBuf>) -> Result<String> {
+async fn legacy_upload(artifact:&Path, root:&Path, base:&str, digest:&str, sig: Option<PathBuf>) -> Result<String> {
     let pkg = parse_package_json(root);
     let app_name = pkg.as_ref().and_then(|p| p.name.clone()).unwrap_or_else(|| "default-app".into());
     let client = reqwest::Client::new();
@@ -351,6 +356,137 @@ async fn real_upload(artifact:&Path, root:&Path, base:&str, digest:&str, sig: Op
     let dep_url = format!("{}/deployments", base.trim_end_matches('/'));
     let _ = client.post(&dep_url).json(&dep_body).send().await; // ignore error
     Ok(artifact_url)
+}
+
+// real_upload removed: migration complete; use two_phase_upload unless --legacy-upload provided.
+
+async fn two_phase_upload(artifact:&Path, root:&Path, base:&str, digest:&str, sig: Option<PathBuf>) -> Result<String> {
+    let pkg = parse_package_json(root);
+    let app_name = pkg.as_ref().and_then(|p| p.name.clone()).unwrap_or_else(|| "default-app".into());
+    let client = reqwest::Client::new();
+    let presign_url = format!("{}/artifacts/presign", base.trim_end_matches('/'));
+    let presign_body = serde_json::json!({"app_name": app_name, "digest": digest});
+    // Decide between single PUT and multipart based on size threshold env var
+    let meta = fs::metadata(artifact)?; let len = meta.len();
+    let threshold = std::env::var("AETHER_MULTIPART_THRESHOLD_BYTES").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(u64::MAX);
+    if len >= threshold && threshold>0 {
+        return multipart_upload(artifact, root, base, digest, sig).await;
+    }
+    let presign_resp = client.post(&presign_url).json(&presign_body).send().await.map_err(|e| CliError::with_source(CliErrorKind::Runtime("presign request failed".into()), e))?;
+    if !presign_resp.status().is_success() { return Err(CliError::new(CliErrorKind::Runtime(format!("presign status {}", presign_resp.status()))).into()); }
+    let presign_json: serde_json::Value = presign_resp.json().await.map_err(|e| CliError::with_source(CliErrorKind::Runtime("invalid presign response".into()), e))?;
+    let method = presign_json.get("method").and_then(|m| m.as_str()).unwrap_or("NONE");
+    let storage_key = presign_json.get("storage_key").and_then(|m| m.as_str()).unwrap_or("").to_string();
+    if method == "PUT" {
+        let upload_url = presign_json.get("upload_url").and_then(|u| u.as_str()).ok_or_else(|| CliError::new(CliErrorKind::Runtime("missing upload_url".into())))?;
+        // Upload artifact via PUT with optional progress bar
+        let meta = fs::metadata(artifact)?; let len = meta.len();
+        let mut put_req = client.put(upload_url);
+        if let Some(hdrs) = presign_json.get("headers").and_then(|h| h.as_object()) {
+            for (k,v) in hdrs.iter() { if let Some(val)=v.as_str() { put_req = put_req.header(k, val); } }
+        }
+        let use_progress = atty::is(atty::Stream::Stderr) && len > 512 * 1024; // show for larger files in tty
+        let pb = if use_progress { let pb = ProgressBar::new(len); pb.set_style(ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})").unwrap().progress_chars("=>-")); Some(pb) } else { None };
+        let start_put = Instant::now();
+        if len <= 512 * 1024 { // buffer
+            let bytes = tokio::fs::read(artifact).await.map_err(|e| CliError::with_source(CliErrorKind::Io("read artifact".into()), e))?;
+            if let Some(pb) = &pb { pb.inc(len); pb.finish_and_clear(); }
+            put_req = put_req.body(bytes);
+        } else {
+            use tokio::io::AsyncReadExt;
+            let mut file = tokio::fs::File::open(artifact).await.map_err(|e| CliError::with_source(CliErrorKind::Io("open artifact".into()), e))?;
+            let mut sent: u64 = 0; let mut buf = vec![0u8; 128 * 1024];
+            // We build a streaming body manually updating progress
+            let stream = async_stream::stream! {
+                loop {
+                    match file.read(&mut buf).await { Ok(0) => break, Ok(n) => { sent += n as u64; if let Some(pb)=&pb { pb.set_position(sent); } yield Ok::<_, std::io::Error>(bytes::Bytes::copy_from_slice(&buf[..n])); }, Err(_e)=> { break; } }
+                }
+                if let Some(pb)=&pb { pb.finish_and_clear(); }
+            };
+            put_req = put_req.body(reqwest::Body::wrap_stream(stream));
+        }
+        let put_resp = put_req.send().await.map_err(|e| CliError::with_source(CliErrorKind::Runtime("PUT upload failed".into()), e))?;
+        if !put_resp.status().is_success() { return Err(CliError::new(CliErrorKind::Runtime(format!("PUT status {}", put_resp.status()))).into()); }
+        let put_duration = start_put.elapsed().as_secs_f64();
+        // Complete step
+        let size_bytes = fs::metadata(artifact).map(|m| m.len() as i64).unwrap_or(0);
+        let signature_hex = if let Some(sig_path) = sig { fs::read_to_string(sig_path).ok().map(|s| s.trim().to_string()) } else { None };
+        let complete_url = format!("{}/artifacts/complete", base.trim_end_matches('/'));
+        let idempotency_key = format!("idem-{}", digest);
+        let complete_body = serde_json::json!({"app_name": app_name, "digest": digest, "size_bytes": size_bytes, "signature": signature_hex, "idempotency_key": idempotency_key});
+        let comp_resp = client.post(&complete_url).header("X-Aether-Upload-Duration", format!("{:.6}", put_duration)).json(&complete_body).send().await.map_err(|e| CliError::with_source(CliErrorKind::Runtime("complete request failed".into()), e))?;
+        if !comp_resp.status().is_success() { return Err(CliError::new(CliErrorKind::Runtime(format!("complete status {}", comp_resp.status()))).into()); }
+        // Optionally create deployment referencing storage key
+        let dep_body = serde_json::json!({"app_name": app_name, "artifact_url": storage_key});
+        let dep_url = format!("{}/deployments", base.trim_end_matches('/'));
+        let _ = client.post(&dep_url).json(&dep_body).send().await; // ignore error
+        return Ok(storage_key);
+    }
+    // Already stored (method NONE) -> create deployment pointing to storage_key
+    if method == "NONE" {
+        let dep_body = serde_json::json!({"app_name": app_name, "artifact_url": storage_key});
+        let dep_url = format!("{}/deployments", base.trim_end_matches('/'));
+        let _ = client.post(&dep_url).json(&dep_body).send().await; // ignore error
+        return Ok(storage_key);
+    }
+    Err(CliError::new(CliErrorKind::Runtime("unsupported presign method".into())).into())
+}
+
+async fn multipart_upload(artifact:&Path, root:&Path, base:&str, digest:&str, sig: Option<PathBuf>) -> Result<String> {
+    let client = reqwest::Client::new();
+    let pkg = parse_package_json(root);
+    let app_name = pkg.as_ref().and_then(|p| p.name.clone()).unwrap_or_else(|| "default-app".into());
+    // init
+    let init_url = format!("{}/artifacts/multipart/init", base.trim_end_matches('/'));
+    let init_body = serde_json::json!({"app_name": app_name, "digest": digest});
+    let init_resp = client.post(&init_url).json(&init_body).send().await.map_err(|e| CliError::with_source(CliErrorKind::Runtime("multipart init failed".into()), e))?;
+    if !init_resp.status().is_success() { return Err(CliError::new(CliErrorKind::Runtime(format!("multipart init status {}", init_resp.status()))).into()); }
+    let init_json: serde_json::Value = init_resp.json().await.map_err(|e| CliError::with_source(CliErrorKind::Runtime("invalid init response".into()), e))?;
+    let upload_id = init_json.get("upload_id").and_then(|v| v.as_str()).ok_or_else(|| CliError::new(CliErrorKind::Runtime("missing upload_id".into())))?.to_string();
+    let storage_key = init_json.get("storage_key").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    // chunk file
+    let part_size = std::env::var("AETHER_MULTIPART_PART_SIZE_BYTES").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(8*1024*1024);
+    let meta = fs::metadata(artifact)?; let total = meta.len();
+    let use_progress = atty::is(atty::Stream::Stderr) && total > part_size;
+    let pb = if use_progress { let pb = ProgressBar::new(total); pb.set_style(ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})").unwrap()); Some(pb) } else { None };
+    let mut file = tokio::fs::File::open(artifact).await.map_err(|e| CliError::with_source(CliErrorKind::Io("open artifact".into()), e))?;
+    use tokio::io::AsyncReadExt;
+    let mut buf = vec![0u8; part_size as usize];
+    let mut part_number: i32 = 1; let mut parts: Vec<(i32,String)> = Vec::new(); let start_all = Instant::now();
+    loop {
+        let mut read: usize = 0;
+        while read < part_size as usize {
+            match file.read(&mut buf[read..(part_size as usize)]).await { Ok(0)=> break, Ok(n)=> { read += n; if read >= part_size as usize { break; } }, Err(e)=> return Err(CliError::with_source(CliErrorKind::Io("read artifact".into()), e).into()) }
+        }
+        if read==0 { break; }
+        let presign_part_url = format!("{}/artifacts/multipart/presign-part", base.trim_end_matches('/'));
+        let presign_part_body = serde_json::json!({"digest": digest, "upload_id": upload_id, "part_number": part_number});
+        let part_resp = client.post(&presign_part_url).json(&presign_part_body).send().await.map_err(|e| CliError::with_source(CliErrorKind::Runtime("presign part failed".into()), e))?;
+        if !part_resp.status().is_success() { return Err(CliError::new(CliErrorKind::Runtime(format!("presign part status {}", part_resp.status()))).into()); }
+        let part_json: serde_json::Value = part_resp.json().await.map_err(|e| CliError::with_source(CliErrorKind::Runtime("invalid part response".into()), e))?;
+        let url = part_json.get("url").and_then(|v| v.as_str()).ok_or_else(|| CliError::new(CliErrorKind::Runtime("missing part url".into())))?;
+        let mut put_req = client.put(url);
+        if let Some(hdrs) = part_json.get("headers").and_then(|h| h.as_object()) { for (k,v) in hdrs.iter() { if let Some(val)=v.as_str() { put_req = put_req.header(k, val); } } }
+        let body_slice = &buf[..read];
+        put_req = put_req.body(body_slice.to_vec());
+        let resp = put_req.send().await.map_err(|e| CliError::with_source(CliErrorKind::Runtime("part upload failed".into()), e))?;
+        if !resp.status().is_success() { return Err(CliError::new(CliErrorKind::Runtime(format!("part upload status {}", resp.status()))).into()); }
+        let etag = resp.headers().get("ETag").and_then(|v| v.to_str().ok()).unwrap_or("").trim_matches('"').to_string();
+        parts.push((part_number, etag));
+        if let Some(pb)=&pb { pb.inc(read as u64); }
+        part_number +=1;
+    }
+    if let Some(pb)=&pb { pb.finish_and_clear(); }
+    let duration = start_all.elapsed().as_secs_f64();
+    // complete
+    let signature_hex = if let Some(sig_path) = sig { fs::read_to_string(sig_path).ok().map(|s| s.trim().to_string()) } else { None };
+    let complete_url = format!("{}/artifacts/multipart/complete", base.trim_end_matches('/'));
+    let idempotency_key = format!("idem-{}", digest);
+    let parts_json: Vec<serde_json::Value> = parts.iter().map(|(n,e)| serde_json::json!({"part_number": n, "etag": e})).collect();
+    let complete_body = serde_json::json!({"app_name": app_name, "digest": digest, "upload_id": upload_id, "size_bytes": fs::metadata(artifact).map(|m| m.len()).unwrap_or(0) as i64, "parts": parts_json, "signature": signature_hex, "idempotency_key": idempotency_key});
+    let resp = client.post(&complete_url).header("X-Aether-Upload-Duration", format!("{:.6}", duration)).json(&complete_body).send().await.map_err(|e| CliError::with_source(CliErrorKind::Runtime("multipart complete failed".into()), e))?;
+    if !resp.status().is_success() { return Err(CliError::new(CliErrorKind::Runtime(format!("multipart complete status {}", resp.status()))).into()); }
+    Ok(storage_key)
 }
 
 // Benchmark helper (not part of public CLI API) kept always available for benches

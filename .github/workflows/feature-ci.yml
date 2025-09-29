@@ -54,6 +54,13 @@ jobs:
     runs-on: ubuntu-latest
     env:
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/aether_dev
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_REGION: us-east-1
+      AETHER_STORAGE_MODE: s3
+      AETHER_ARTIFACT_BUCKET: artifacts
+      AETHER_S3_ENDPOINT_URL: http://localhost:9000
+      MINIO_TEST: "1"
     services:
       postgres:
         image: postgres:15
@@ -64,6 +71,15 @@ jobs:
         ports: ["5432:5432"]
         options: >-
           --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+      minio:
+        image: quay.io/minio/minio:RELEASE.2024-09-22T00-00-00Z
+        env:
+          MINIO_ROOT_USER: minioadmin
+          MINIO_ROOT_PASSWORD: minioadmin
+        ports: ["9000:9000"]
+        options: >-
+          --health-cmd "curl -f http://localhost:9000/minio/health/ready || exit 1" --health-interval 5s --health-timeout 5s --health-retries 10
+        command: server /data --console-address :9001
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust toolchain
@@ -84,6 +100,20 @@ jobs:
             pg_isready -h 127.0.0.1 -U postgres && break
             sleep 1
           done
+      - name: Wait for MinIO
+        run: |
+          for i in {1..40}; do
+            curl -sf http://127.0.0.1:9000/minio/health/ready && break
+            sleep 1
+            if [ "$i" = "40" ]; then echo "MinIO not ready"; exit 1; fi
+          done
+      - name: Setup bucket (MinIO)
+        run: |
+          curl -sSL -o mc https://dl.min.io/client/mc/release/linux-amd64/mc
+          chmod +x mc
+          ./mc alias set local http://127.0.0.1:9000 $AWS_ACCESS_KEY_ID $AWS_SECRET_ACCESS_KEY
+          ./mc mb --ignore-existing local/$AETHER_ARTIFACT_BUCKET
+          ./mc ls local
       - name: Install sqlx-cli
         run: cargo install sqlx-cli --no-default-features --features native-tls,postgres
       - name: Run migrations

@@ -34,6 +34,10 @@ hex = "0.4"
 ed25519-dalek = { workspace = true }
 rand = "0.8"
 tokio-util = { workspace = true }
+indicatif = "0.17"
+atty = "0.2"
+async-stream = "0.3"
+bytes = "1"
 
 [[bench]]
 name = "pack_bench"

@@ -1,4 +1,5 @@
 target/
+crates/control-plane/data/artifacts/
 **/target/
 *.swp
 *.log

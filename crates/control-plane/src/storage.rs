@@ -12,6 +12,10 @@ pub trait StorageBackend: Send + Sync + 'static {
     async fn head_metadata(&self, key:&str) -> anyhow::Result<Option<std::collections::HashMap<String,String>>>; // metadata (if available)
     /// Optionally compute a remote sha256 for small objects (returns Some(digest) if computed, None if skipped / not supported)
     async fn remote_sha256(&self, _key:&str, _max_bytes: i64) -> anyhow::Result<Option<String>> { Ok(None) }
+    /// Multipart operations (default unsupported)
+    async fn init_multipart(&self, _key:&str, _digest:&str) -> anyhow::Result<String> { Err(anyhow::anyhow!("multipart unsupported")) }
+    async fn presign_multipart_part(&self, _key:&str, _upload_id:&str, _part_number:i32) -> anyhow::Result<PresignedUpload> { Err(anyhow::anyhow!("multipart unsupported")) }
+    async fn complete_multipart(&self, _key:&str, _upload_id:&str, _parts:Vec<(i32,String)>) -> anyhow::Result<()> { Err(anyhow::anyhow!("multipart unsupported")) }
 }
 
 #[derive(Debug, Clone)]
@@ -44,7 +48,22 @@ impl StorageBackend for S3StorageBackend {
         use aws_sdk_s3::presigning::PresigningConfig;
         let expires = std::cmp::min(expires.as_secs(), 3600); // cap at 1h
         let config = PresigningConfig::builder().expires_in(Duration::from_secs(expires)).build()?;
-        let presigned = self.client.put_object().bucket(&self.bucket).key(key).metadata("sha256", digest).presigned(config).await?;
+    let mut req = self.client.put_object().bucket(&self.bucket).key(key).metadata("sha256", digest);
+    if let Ok(sse) = std::env::var("AETHER_S3_SSE") { if !sse.is_empty() {
+        #[allow(unused_mut)]
+        let mut apply = true;
+        #[cfg(feature="s3")]
+        {
+            use aws_sdk_s3::types::ServerSideEncryption;
+            match sse.as_str() {
+                "AES256" => { req = req.server_side_encryption(ServerSideEncryption::Aes256); },
+                "aws:kms" => { req = req.server_side_encryption(ServerSideEncryption::AwsKms); },
+                other => { warn!(value=%other, "invalid_sse_algorithm" ); apply=false; }
+            }
+        }
+        if apply { if let Ok(kms) = std::env::var("AETHER_S3_SSE_KMS_KEY") { if !kms.is_empty() { req = req.ssekms_key_id(kms); } } }
+    } }
+    let presigned = req.presigned(config).await?;
         let uri = presigned.uri().to_string();
         let mut headers = std::collections::HashMap::new();
     for (k,v) in presigned.headers() { headers.insert(k.to_string(), v.to_string()); }
@@ -113,6 +132,29 @@ impl StorageBackend for S3StorageBackend {
                 }
             }
         }
+    }
+    async fn init_multipart(&self, key:&str, digest:&str) -> anyhow::Result<String> {
+        let mut req = self.client.create_multipart_upload().bucket(&self.bucket).key(key).metadata("sha256", digest);
+        if let Ok(sse) = std::env::var("AETHER_S3_SSE") { if !sse.is_empty() {
+            use aws_sdk_s3::types::ServerSideEncryption;
+            match sse.as_str() { "AES256" => { req = req.server_side_encryption(ServerSideEncryption::Aes256); }, "aws:kms" => { req = req.server_side_encryption(ServerSideEncryption::AwsKms); if let Ok(kms)=std::env::var("AETHER_S3_SSE_KMS_KEY") { if !kms.is_empty() { req = req.ssekms_key_id(kms); } } }, _=>{} }
+        }}
+        let out = req.send().await?; Ok(out.upload_id().unwrap_or_default().to_string())
+    }
+    async fn presign_multipart_part(&self, key:&str, upload_id:&str, part_number:i32) -> anyhow::Result<PresignedUpload> {
+        use aws_sdk_s3::presigning::PresigningConfig;
+        let config = PresigningConfig::builder().expires_in(Duration::from_secs(900)).build()?;
+        let req = self.client.upload_part().bucket(&self.bucket).key(key).upload_id(upload_id).part_number(part_number);
+        let presigned = req.presigned(config).await?;
+        let mut headers = std::collections::HashMap::new(); for (k,v) in presigned.headers() { headers.insert(k.to_string(), v.to_string()); }
+        Ok(PresignedUpload { url: presigned.uri().to_string(), method: "PUT".into(), headers, storage_key: key.to_string() })
+    }
+    async fn complete_multipart(&self, key:&str, upload_id:&str, parts:Vec<(i32,String)>) -> anyhow::Result<()> {
+        use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
+        let completed = CompletedMultipartUpload::builder()
+            .set_parts(Some(parts.into_iter().map(|(n,e)| CompletedPart::builder().set_part_number(Some(n)).set_e_tag(Some(e)).build()).collect()))
+            .build();
+        self.client.complete_multipart_upload().bucket(&self.bucket).key(key).upload_id(upload_id).multipart_upload(completed).send().await?; Ok(())
     }
 }
 
