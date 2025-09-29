@@ -28,6 +28,8 @@ async fn run_ingest_loop(client: Client) -> Result<()> {
     let namespace = std::env::var("AETHER_NAMESPACE").unwrap_or_else(|_| "default".to_string());
     let pods: Api<Pod> = Api::namespaced(client.clone(), &namespace);
     use std::collections::{HashMap, HashSet};
+    use rustc_hash::FxHasher;
+    use std::hash::Hasher;
     let mut seen: HashMap<String, HashSet<u64>> = HashMap::new();
     let poll_secs: u64 = std::env::var("AETHER_DEV_HOT_INGEST_POLL_SEC").ok().and_then(|v| v.parse().ok()).unwrap_or(10).max(1);
     let mut err_attempt: u32 = 0;
@@ -45,7 +47,9 @@ async fn run_ingest_loop(client: Client) -> Result<()> {
                         Ok(text) => {
                             let entry = seen.entry(name.clone()).or_default();
                             for line in text.lines() {
-                                let h = fxhash::hash64(line.as_bytes());
+                                let mut hasher = FxHasher::default();
+                                hasher.write(line.as_bytes());
+                                let h = hasher.finish();
                                 if !entry.contains(&h) {
                                     parse_and_record(&name, line);
                                     entry.insert(h);
