@@ -28,6 +28,8 @@ jobs:
         with:
           toolchain: 1.90.0
           components: clippy
+      - name: Install sccache
+        run: cargo install sccache --locked || true
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -35,7 +37,10 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
+            ~/.cache/sccache
           key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+      - name: Configure sccache env
+        run: echo "RUSTC_WRAPPER=$(which sccache)" >> $GITHUB_ENV
       - name: Wait for Postgres
         run: |
           for i in {1..30}; do
@@ -51,6 +56,8 @@ jobs:
         run: sqlx migrate run
       - name: Build
         run: cargo build --workspace --all-targets --release
+      - name: sccache stats (post-build)
+        run: sccache --show-stats || true
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: SQLx Prepare (Offline)

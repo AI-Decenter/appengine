@@ -396,8 +396,18 @@ Tables (PostgreSQL via SQLx):
 Detailed procedures are specified in `DEVELOPMENT.md`. A provisioning and verification script `dev.sh` automates environment bootstrap (Rust toolchain, Docker, MicroK8s, PostgreSQL container) and readiness checks.
 
 Quick Start:
-1. Ensure Linux host with Docker + Snap available.
-2. Execute `./dev.sh bootstrap` (installs or configures missing components where feasible).
+1. Ensure Linux host with Docker (and optionally Snap if using MicroK8s).
+2. Option A (script): `./dev.sh bootstrap`
+3. Option B (docker-compose):
+	```bash
+	docker compose up -d postgres minio
+	export DATABASE_URL=postgres://aether:postgres@localhost:5432/aether_dev
+	make test
+	```
+4. To just start DB for tests: `make db-start` or `./dev.sh db-start`
+5. Run full suite: `make test`
+
+docker-compose services (Postgres + MinIO) are defined in `docker-compose.yml` to enable S3-mode (`AETHER_STORAGE_MODE=s3`).
 3. Run `./dev.sh verify` to confirm environment readiness.
 
 ---

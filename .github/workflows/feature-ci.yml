@@ -32,6 +32,8 @@ jobs:
         with:
           toolchain: ${{ env.RUST_VERSION }}
           components: clippy
+      - name: Install sccache
+        run: cargo install sccache --locked || true
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -39,7 +41,10 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
+            ~/.cache/sccache
           key: lint-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+      - name: Configure sccache env
+        run: echo "RUSTC_WRAPPER=$(which sccache)" >> $GITHUB_ENV
       - name: Fetch deps
         run: cargo fetch
       - name: Clippy (deny warnings)
@@ -79,13 +84,15 @@ jobs:
         ports: ["9000:9000"]
         options: >-
           --health-cmd "curl -f http://localhost:9000/minio/health/ready || exit 1" --health-interval 5s --health-timeout 5s --health-retries 10
-        command: server /data --console-address :9001
+        command: ["server", "/data", "--console-address", ":9001"]
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_VERSION }}
+      - name: Install sccache
+        run: cargo install sccache --locked || true
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -93,7 +100,10 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
+            ~/.cache/sccache
           key: test-linux-${{ hashFiles('Cargo.lock') }}
+      - name: Configure sccache env
+        run: echo "RUSTC_WRAPPER=$(which sccache)" >> $GITHUB_ENV
       - name: Wait for Postgres
         run: |
           for i in {1..30}; do
@@ -152,6 +162,8 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_VERSION }}
+      - name: Install sccache
+        run: cargo install sccache --locked || true
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -159,7 +171,10 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
+            ~/.cache/sccache
           key: test-macos-${{ hashFiles('Cargo.lock') }}
+      - name: Configure sccache env
+        run: echo "RUSTC_WRAPPER=$(which sccache)" >> $GITHUB_ENV
       - name: Install PostgreSQL 15 (Homebrew)
         run: |
           brew update
@@ -224,6 +239,8 @@ jobs:
         with:
           toolchain: ${{ env.RUST_VERSION }}
           components: llvm-tools-preview
+      - name: Install sccache
+        run: cargo install sccache --locked || true
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -231,7 +248,10 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
+            ~/.cache/sccache
           key: coverage-${{ hashFiles('Cargo.lock') }}
+      - name: Configure sccache env
+        run: echo "RUSTC_WRAPPER=$(which sccache)" >> $GITHUB_ENV
       - name: Wait for Postgres
         run: |
           for i in {1..30}; do
@@ -267,6 +287,8 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_VERSION }}
+      - name: Install sccache
+        run: cargo install sccache --locked || true
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -274,7 +296,10 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
+            ~/.cache/sccache
           key: deny-${{ hashFiles('Cargo.lock') }}
+      - name: Configure sccache env
+        run: echo "RUSTC_WRAPPER=$(which sccache)" >> $GITHUB_ENV
       - name: Install cargo-deny
         uses: taiki-e/install-action@v2
         with:
@@ -293,8 +318,23 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_VERSION }}
+      - name: Install sccache
+        run: cargo install sccache --locked || true
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            ~/.cache/sccache
+          key: performance-${{ hashFiles('Cargo.lock') }}
+      - name: Configure sccache env
+        run: echo "RUSTC_WRAPPER=$(which sccache)" >> $GITHUB_ENV
       - name: Build release CLI
         run: cargo build -p aether-cli --release
+      - name: sccache stats
+        run: sccache --show-stats || true
       - name: Install hyperfine
         run: sudo apt-get update && sudo apt-get install -y hyperfine
       - name: Benchmark startup (aether-cli --help)

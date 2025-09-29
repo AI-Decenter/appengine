@@ -1,5 +1,5 @@
 use axum::{body::Body, http::{Request, StatusCode}, middleware};
-use control_plane::{build_router, AppState, db::init_db};
+use control_plane::{build_router, AppState};
 use tower::util::ServiceExt; // for oneshot
 use sha2::{Sha256, Digest};
 use ed25519_dalek::{SigningKey, Signature, Signer};
@@ -16,18 +16,9 @@ fn init_tracing() {
     });
 }
 
-// Mandatory pool (fail fast if DATABASE_URL missing or unreachable) and run migrations each call.
-async fn pool() -> sqlx::Pool<sqlx::Postgres> {
-    init_tracing();
-    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for tests (e.g. postgres://user:pass@localhost:5432/aether_dev)");
-    let pool = init_db(&url).await.expect("failed to init db");
-    // Always attempt to run migrations; they are idempotent and this ensures newly added
-    // migration files are applied even if earlier tests already initialized the OnceCell.
-    // This avoids stale schemas causing silent failures (e.g. ignored INSERT errors when
-    // referencing newly added columns during the same test process lifecycle).
-    sqlx::migrate!().run(&pool).await.expect("migrations failed");
-    pool
-}
+
+// Reuse global shared test pool (migrated once) from crate test_support.
+async fn pool() -> sqlx::Pool<sqlx::Postgres> { init_tracing(); control_plane::test_support::test_pool().await }
 
 async fn ensure_schema(pool: &sqlx::Pool<sqlx::Postgres>) {
     // Basic presence checks for required tables

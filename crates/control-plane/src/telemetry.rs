@@ -1,3 +1,13 @@
+pub static DEPLOYMENT_STATUS: Lazy<IntCounterVec> = Lazy::new(|| {
+    let c = IntCounterVec::new(opts!("deployment_status_total", "Deployment status transitions"), &["status"]).unwrap();
+    REGISTRY.register(Box::new(c.clone())).ok();
+    c
+});
+pub static DEPLOYMENT_TIME_TO_RUNNING: Lazy<prometheus::Histogram> = Lazy::new(|| {
+    let h = prometheus::Histogram::with_opts(histogram_opts!("deployment_time_to_running_seconds", "Time from creation to running")).unwrap();
+    REGISTRY.register(Box::new(h.clone())).ok();
+    h
+});
 use prometheus::{TextEncoder, Encoder, Registry, IntCounterVec, HistogramVec, IntGauge, opts, histogram_opts};
 use once_cell::sync::Lazy;
 use axum::{response::IntoResponse, http::StatusCode};

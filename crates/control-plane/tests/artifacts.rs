@@ -1,16 +1,10 @@
-use control_plane::{build_router, AppState};
+use control_plane::{build_router};
+use control_plane::test_support::test_state;
 use axum::{http::{Request, StatusCode}, body::Body};
 use tower::util::ServiceExt;
 use serde_json::json;
 
-async fn setup() -> control_plane::AppState {
-    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for tests");
-    let pool = sqlx::postgres::PgPoolOptions::new().max_connections(5).connect(&url).await.unwrap();
-    sqlx::migrate!().run(&pool).await.unwrap();
-    sqlx::query("DELETE FROM artifacts").execute(&pool).await.ok();
-    sqlx::query("DELETE FROM applications").execute(&pool).await.ok();
-    AppState { db: pool }
-}
+async fn setup() -> control_plane::AppState { test_state().await }
 
 #[tokio::test]
 #[serial_test::serial]
@@ -18,7 +12,7 @@ async fn artifact_meta_flow() {
     let state = setup().await; let app = build_router(state.clone());
     // 404 first
     let digest = format!("{:064x}", 1);
-    let res = app.clone().oneshot(Request::builder().method("GET").uri(&format!("/artifacts/{}/meta", digest)).body(Body::empty()).unwrap()).await.unwrap();
+    let res = app.clone().oneshot(Request::builder().method("GET").uri(format!("/artifacts/{}/meta", digest)).body(Body::empty()).unwrap()).await.unwrap();
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
     // presign then complete
     let presign_body = json!({"app_name":"metaapp","digest": digest}).to_string();
@@ -27,7 +21,7 @@ async fn artifact_meta_flow() {
     let complete_body = json!({"app_name":"metaapp","digest": digest, "size_bytes":0, "signature": null}).to_string();
     let res = app.clone().oneshot(Request::builder().method("POST").uri("/artifacts/complete").header("content-type","application/json").body(Body::from(complete_body)).unwrap()).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
-    let res = app.clone().oneshot(Request::builder().method("GET").uri(&format!("/artifacts/{}/meta", digest)).body(Body::empty()).unwrap()).await.unwrap();
+    let res = app.clone().oneshot(Request::builder().method("GET").uri(format!("/artifacts/{}/meta", digest)).body(Body::empty()).unwrap()).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
 }
 
@@ -87,7 +81,16 @@ async fn retention_keeps_latest_only() {
     let arr: serde_json::Value = serde_json::from_slice(&body).unwrap();
     // only second digest should remain for rapp
     let mut seen_latest = false; let mut old_present = false;
-    if let Some(a)=arr.as_array() { for item in a { if item.get("digest").and_then(|v| v.as_str())==Some(&d2) { seen_latest=true; } if item.get("digest").and_then(|v| v.as_str())==Some(&d1) { old_present=true; } } }
+    if let Some(a) = arr.as_array() {
+        for item in a {
+            if item.get("digest").and_then(|v| v.as_str()) == Some(&d2) {
+                seen_latest = true;
+            }
+            if item.get("digest").and_then(|v| v.as_str()) == Some(&d1) {
+                old_present = true;
+            }
+        }
+    }
     assert!(seen_latest); assert!(!old_present, "old artifact should have been GC'd");
     std::env::remove_var("AETHER_RETAIN_LATEST_PER_APP");
 }

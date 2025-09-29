@@ -5,13 +5,16 @@ pub mod error;
 pub mod services;
 pub mod telemetry;
 pub mod storage;
+pub mod test_support;
+pub mod k8s; // Kubernetes integration (Issue 04)
+pub mod k8s_watch;
 
 // Re-export storage accessor to provide a stable import path even if the module path resolution behaves differently in some build contexts.
 pub use storage::get_storage;
 
 use axum::{Router, routing::{get, post}};
 use sqlx::{Pool, Postgres};
-use handlers::{health::health, apps::{list_apps, app_logs, create_app, app_deployments, add_public_key}, deployments::{create_deployment, list_deployments}, readiness::readiness, uploads::{upload_artifact, list_artifacts, head_artifact, presign_artifact, complete_artifact, multipart_init, multipart_presign_part, multipart_complete}};
+use handlers::{health::health, apps::{list_apps, app_logs, create_app, app_deployments, add_public_key}, deployments::{create_deployment, list_deployments, get_deployment}, readiness::readiness, uploads::{upload_artifact, list_artifacts, head_artifact, presign_artifact, complete_artifact, multipart_init, multipart_presign_part, multipart_complete}};
 use utoipa::OpenApi;
 use crate::telemetry::metrics_handler;
 use axum::response::Html;
@@ -30,6 +33,7 @@ pub struct AppState { pub db: Pool<Postgres> }
         handlers::apps::app_deployments,
         handlers::deployments::create_deployment,
     handlers::deployments::list_deployments,
+        handlers::deployments::get_deployment,
     handlers::uploads::upload_artifact,
     handlers::uploads::list_artifacts,
     handlers::uploads::presign_artifact,
@@ -70,25 +74,48 @@ pub fn build_router(state: AppState) -> Router {
         value["security"] = json!([{"bearer_auth": []}]);
         if let Ok(spec) = serde_json::from_value(value.clone()) { openapi = spec; }
     }
-    // Initialize artifacts_total gauge asynchronously
-    let db_clone = state.db.clone();
-    tokio::spawn(async move { crate::handlers::uploads::init_artifacts_total(&db_clone).await; });
-    // Spawn pending artifact GC loop
-    let db_gc = state.db.clone();
-    tokio::spawn(async move {
-        let ttl = std::env::var("AETHER_PENDING_TTL_SECS").ok().and_then(|v| v.parse::<i64>().ok()).unwrap_or(3600);
-        let interval = std::env::var("AETHER_PENDING_GC_INTERVAL_SECS").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(60);
-        loop {
-            crate::handlers::uploads::run_pending_gc(&db_gc, ttl).await.ok();
-            tokio::time::sleep(std::time::Duration::from_secs(interval.max(5))).await;
-        }
-    });
+    // Background tasks (can be disabled in tests via AETHER_DISABLE_BACKGROUND=1)
+    if std::env::var("AETHER_DISABLE_BACKGROUND").ok().as_deref() != Some("1") {
+        // Initialize artifacts_total gauge asynchronously
+        let db_clone = state.db.clone();
+        tokio::spawn(async move { crate::handlers::uploads::init_artifacts_total(&db_clone).await; });
+        // Spawn pending artifact GC loop
+        let db_gc = state.db.clone();
+        tokio::spawn(async move {
+            let ttl = std::env::var("AETHER_PENDING_TTL_SECS").ok().and_then(|v| v.parse::<i64>().ok()).unwrap_or(3600);
+            let interval = std::env::var("AETHER_PENDING_GC_INTERVAL_SECS").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(60);
+            loop {
+                crate::handlers::uploads::run_pending_gc(&db_gc, ttl).await.ok();
+                tokio::time::sleep(std::time::Duration::from_secs(interval.max(5))).await;
+            }
+        });
+        // Failed deployment GC loop
+        let db_dep_gc = state.db.clone();
+        tokio::spawn(async move {
+            let ttl = std::env::var("AETHER_DEPLOYMENT_FAILED_TTL_SECS").ok().and_then(|v| v.parse::<i64>().ok()).unwrap_or(3600);
+            let interval = std::env::var("AETHER_DEPLOYMENT_FAILED_GC_INTERVAL_SECS").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(300);
+            loop {
+                if let Ok(deleted) = crate::services::deployments::run_failed_deployments_gc(&db_dep_gc, ttl).await { if deleted > 0 { tracing::info!(deleted, "failed_deployments_gc_deleted"); } }
+                tokio::time::sleep(std::time::Duration::from_secs(interval.max(30))).await;
+            }
+        });
+    } else {
+        tracing::info!("background_tasks_disabled");
+    }
+    // Watch-based controller for deployment status (can be disabled for tests via env)
+    if std::env::var("AETHER_DISABLE_WATCH").ok().as_deref() != Some("1") {
+        let db_status = state.db.clone();
+        tokio::spawn(async move {
+            crate::k8s_watch::run_deployment_status_watcher(db_status).await;
+        });
+    }
     Router::new()
         .route("/health", get(health))
     .route("/readyz", get(readiness))
     .route("/startupz", get(handlers::readiness::startupz))
         .route("/metrics", get(metrics_handler))
     .route("/deployments", post(create_deployment).get(list_deployments))
+    .route("/deployments/:id", get(get_deployment).patch(handlers::deployments::update_deployment))
     .route("/artifacts", post(upload_artifact).get(list_artifacts))
     .route("/artifacts/presign", post(presign_artifact))
     .route("/artifacts/complete", post(complete_artifact))
@@ -116,9 +143,7 @@ mod tests {
 
     #[tokio::test]
     async fn health_ok() {
-    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for tests");
-    let pool = sqlx::postgres::PgPoolOptions::new().max_connections(5).connect(&url).await.unwrap();
-    sqlx::migrate!().run(&pool).await.unwrap();
+    let pool = crate::test_support::test_pool().await;
     let app = build_router(AppState { db: pool });
         let res = app.oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
@@ -130,9 +155,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn create_deployment_201() {
-    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    let pool = sqlx::postgres::PgPoolOptions::new().max_connections(5).connect(&url).await.unwrap();
-    sqlx::migrate!().run(&pool).await.unwrap();
+    let pool = crate::test_support::test_pool().await;
         sqlx::query("DELETE FROM deployments").execute(&pool).await.ok();
         sqlx::query("DELETE FROM applications").execute(&pool).await.ok();
         sqlx::query("INSERT INTO applications (name) VALUES ($1)").bind("app1").execute(&pool).await.unwrap();
@@ -149,9 +172,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn list_apps_empty() {
-    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    let pool = sqlx::postgres::PgPoolOptions::new().max_connections(5).connect(&url).await.unwrap();
-    sqlx::migrate!().run(&pool).await.unwrap();
+    let pool = crate::test_support::test_pool().await;
         sqlx::query("DELETE FROM deployments").execute(&pool).await.ok();
         sqlx::query("DELETE FROM applications").execute(&pool).await.ok();
     let app_router = build_router(AppState { db: pool });
@@ -164,9 +185,7 @@ mod tests {
 
     #[tokio::test]
     async fn app_logs_empty() {
-    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    let pool = sqlx::postgres::PgPoolOptions::new().max_connections(5).connect(&url).await.unwrap();
-    sqlx::migrate!().run(&pool).await.unwrap();
+    let pool = crate::test_support::test_pool().await;
     let app = build_router(AppState { db: pool });
         let res = app.oneshot(Request::builder().uri("/apps/demo/logs").body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
@@ -176,9 +195,7 @@ mod tests {
 
     #[tokio::test]
     async fn readiness_ok() {
-    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    let pool = sqlx::postgres::PgPoolOptions::new().max_connections(5).connect(&url).await.unwrap();
-    sqlx::migrate!().run(&pool).await.unwrap();
+    let pool = crate::test_support::test_pool().await;
     let app = build_router(AppState { db: pool });
         let res = app.oneshot(Request::builder().uri("/readyz").body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
@@ -187,9 +204,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn create_deployment_bad_json() {
-    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    let pool = sqlx::postgres::PgPoolOptions::new().max_connections(5).connect(&url).await.unwrap();
-    sqlx::migrate!().run(&pool).await.unwrap();
+    let pool = crate::test_support::test_pool().await;
     let app_router = build_router(AppState { db: pool });
         let req = Request::builder().method("POST").uri("/deployments")
             .header("content-type","application/json")
@@ -202,9 +217,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn list_deployments_empty() {
-    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    let pool = sqlx::postgres::PgPoolOptions::new().max_connections(5).connect(&url).await.unwrap();
-    sqlx::migrate!().run(&pool).await.unwrap();
+    let pool = crate::test_support::test_pool().await;
         sqlx::query("DELETE FROM deployments").execute(&pool).await.ok();
         sqlx::query("DELETE FROM applications").execute(&pool).await.ok();
     let app_router = build_router(AppState { db: pool });
@@ -218,9 +231,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn app_deployments_flow() {
-    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    let pool = sqlx::postgres::PgPoolOptions::new().max_connections(5).connect(&url).await.unwrap();
-    sqlx::migrate!().run(&pool).await.unwrap();
+    let pool = crate::test_support::test_pool().await;
         sqlx::query("DELETE FROM deployments").execute(&pool).await.ok();
         sqlx::query("DELETE FROM applications").execute(&pool).await.ok();
         sqlx::query("INSERT INTO applications (name) VALUES ($1)").bind("appx").execute(&pool).await.unwrap();
@@ -237,9 +248,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn app_deployments_empty_when_no_deployments() {
-    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    let pool = sqlx::postgres::PgPoolOptions::new().max_connections(5).connect(&url).await.unwrap();
-    sqlx::migrate!().run(&pool).await.unwrap();
+    let pool = crate::test_support::test_pool().await;
         // Clean state
         sqlx::query("DELETE FROM deployments").execute(&pool).await.ok();
         sqlx::query("DELETE FROM applications").execute(&pool).await.ok();
@@ -256,9 +265,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn create_app_conflict_error_json() {
-    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    let pool = sqlx::postgres::PgPoolOptions::new().max_connections(5).connect(&url).await.unwrap();
-    sqlx::migrate!().run(&pool).await.unwrap();
+    let pool = crate::test_support::test_pool().await;
         sqlx::query("DELETE FROM deployments").execute(&pool).await.ok();
         sqlx::query("DELETE FROM applications").execute(&pool).await.ok();
         sqlx::query("INSERT INTO applications (name) VALUES ($1)").bind("dupe").execute(&pool).await.unwrap();
