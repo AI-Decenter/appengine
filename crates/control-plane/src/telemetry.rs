@@ -44,6 +44,23 @@ pub static DB_POOL_IN_USE: Lazy<IntGauge> = Lazy::new(|| {
     g
 });
 
+// Dev hot mode metrics (Issue 05 follow-ups)
+pub static DEV_HOT_REFRESH_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    let c = IntCounterVec::new(opts!("dev_hot_refresh_total", "Successful dev-hot refreshes"), &["app"]).unwrap();
+    REGISTRY.register(Box::new(c.clone())).ok();
+    c
+});
+pub static DEV_HOT_REFRESH_FAILURE_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    let c = IntCounterVec::new(opts!("dev_hot_refresh_failure_total", "Failed dev-hot refresh attempts"), &["app","reason"]).unwrap();
+    REGISTRY.register(Box::new(c.clone())).ok();
+    c
+});
+pub static DEV_HOT_REFRESH_LATENCY: Lazy<prometheus::HistogramVec> = Lazy::new(|| {
+    let h = prometheus::HistogramVec::new(histogram_opts!("dev_hot_refresh_latency_seconds","Time to download and extract new artifact"), &["app"]).unwrap();
+    REGISTRY.register(Box::new(h.clone())).ok();
+    h
+});
+
 pub fn normalize_path(raw: &str) -> String {
     // Broader normalization:
     // - Replace UUID segments with :id

@@ -1,0 +1,1 @@
+{"title":"MVP: Issues 04 & 05 (Deployment controller + Dev Hot Mode)","head":"askerNQK:feat/complete-aether-engine-mvp","base":"main","body":"Implements Issues 04 & 05: deployment controller, status watcher, GC, dev hot mode sidecar, CLI flag, embedded Postgres test fallback."}

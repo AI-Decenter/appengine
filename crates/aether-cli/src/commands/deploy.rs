@@ -41,10 +41,11 @@ pub struct DeployOptions {
     pub no_sbom: bool,
     pub format: Option<String>,
     pub use_legacy_upload: bool,
+    pub dev_hot: bool,
 }
 
 pub async fn handle(opts: DeployOptions) -> Result<()> {
-    let DeployOptions { dry_run, pack_only, compression_level, out, no_upload, no_cache, no_sbom, format, use_legacy_upload } = opts;
+    let DeployOptions { dry_run, pack_only, compression_level, out, no_upload, no_cache, no_sbom, format, use_legacy_upload, dev_hot } = opts;
     let root = Path::new(".");
     if !is_node_project(root) { return Err(CliError::new(CliErrorKind::Usage("not a NodeJS project (missing package.json)".into())).into()); }
     if dry_run { info!(event="deploy.dry_run", msg="Would run install + prune + package project"); return Ok(()); }
@@ -96,7 +97,7 @@ pub async fn handle(opts: DeployOptions) -> Result<()> {
 
     if !no_upload {
         if let Ok(base) = std::env::var("AETHER_API_BASE") {
-            let upload_res = if use_legacy_upload { legacy_upload(&artifact_name, root, &base, &digest, sig_path.exists().then(|| sig_path.clone())).await } else { two_phase_upload(&artifact_name, root, &base, &digest, sig_path.exists().then(|| sig_path.clone())).await };
+            let upload_res = if use_legacy_upload { legacy_upload(&artifact_name, root, &base, &digest, sig_path.exists().then(|| sig_path.clone()), dev_hot).await } else { two_phase_upload(&artifact_name, root, &base, &digest, sig_path.exists().then(|| sig_path.clone()), dev_hot).await };
             match upload_res {
                 Ok(url)=> info!(event="deploy.upload", mode= if use_legacy_upload {"legacy"} else {"two_phase"}, base=%base, artifact=%artifact_name.display(), status="ok", returned_url=%url),
                 Err(e)=> { return Err(e); }
@@ -326,7 +327,7 @@ fn maybe_sign(artifact:&Path, digest:&str) -> Result<()> {
     Ok(())
 }
 
-async fn legacy_upload(artifact:&Path, root:&Path, base:&str, digest:&str, sig: Option<PathBuf>) -> Result<String> {
+async fn legacy_upload(artifact:&Path, root:&Path, base:&str, digest:&str, sig: Option<PathBuf>, dev_hot: bool) -> Result<String> {
     let pkg = parse_package_json(root);
     let app_name = pkg.as_ref().and_then(|p| p.name.clone()).unwrap_or_else(|| "default-app".into());
     let client = reqwest::Client::new();
@@ -352,7 +353,7 @@ async fn legacy_upload(artifact:&Path, root:&Path, base:&str, digest:&str, sig: 
     if !resp.status().is_success() { return Err(CliError::new(CliErrorKind::Runtime(format!("upload failed status {}", resp.status()))).into()); }
     let v: serde_json::Value = resp.json().await.map_err(|e| CliError::with_source(CliErrorKind::Runtime("invalid upload response".into()), e))?;
     let artifact_url = v.get("artifact_url").and_then(|x| x.as_str()).unwrap_or("").to_string();
-    let dep_body = serde_json::json!({"app_name": app_name, "artifact_url": artifact_url});
+    let dep_body = serde_json::json!({"app_name": app_name, "artifact_url": artifact_url, "dev_hot": dev_hot});
     let dep_url = format!("{}/deployments", base.trim_end_matches('/'));
     let _ = client.post(&dep_url).json(&dep_body).send().await; // ignore error
     Ok(artifact_url)
@@ -360,7 +361,7 @@ async fn legacy_upload(artifact:&Path, root:&Path, base:&str, digest:&str, sig: 
 
 // real_upload removed: migration complete; use two_phase_upload unless --legacy-upload provided.
 
-async fn two_phase_upload(artifact:&Path, root:&Path, base:&str, digest:&str, sig: Option<PathBuf>) -> Result<String> {
+async fn two_phase_upload(artifact:&Path, root:&Path, base:&str, digest:&str, sig: Option<PathBuf>, dev_hot: bool) -> Result<String> {
     let pkg = parse_package_json(root);
     let app_name = pkg.as_ref().and_then(|p| p.name.clone()).unwrap_or_else(|| "default-app".into());
     let client = reqwest::Client::new();
@@ -370,7 +371,7 @@ async fn two_phase_upload(artifact:&Path, root:&Path, base:&str, digest:&str, si
     let meta = fs::metadata(artifact)?; let len = meta.len();
     let threshold = std::env::var("AETHER_MULTIPART_THRESHOLD_BYTES").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(u64::MAX);
     if len >= threshold && threshold>0 {
-        return multipart_upload(artifact, root, base, digest, sig).await;
+    return multipart_upload(artifact, root, base, digest, sig, dev_hot).await;
     }
     let presign_resp = client.post(&presign_url).json(&presign_body).send().await.map_err(|e| CliError::with_source(CliErrorKind::Runtime("presign request failed".into()), e))?;
     if !presign_resp.status().is_success() { return Err(CliError::new(CliErrorKind::Runtime(format!("presign status {}", presign_resp.status()))).into()); }
@@ -417,14 +418,14 @@ async fn two_phase_upload(artifact:&Path, root:&Path, base:&str, digest:&str, si
         let comp_resp = client.post(&complete_url).header("X-Aether-Upload-Duration", format!("{:.6}", put_duration)).json(&complete_body).send().await.map_err(|e| CliError::with_source(CliErrorKind::Runtime("complete request failed".into()), e))?;
         if !comp_resp.status().is_success() { return Err(CliError::new(CliErrorKind::Runtime(format!("complete status {}", comp_resp.status()))).into()); }
         // Optionally create deployment referencing storage key
-        let dep_body = serde_json::json!({"app_name": app_name, "artifact_url": storage_key});
+    let dep_body = serde_json::json!({"app_name": app_name, "artifact_url": storage_key, "dev_hot": dev_hot});
         let dep_url = format!("{}/deployments", base.trim_end_matches('/'));
         let _ = client.post(&dep_url).json(&dep_body).send().await; // ignore error
         return Ok(storage_key);
     }
     // Already stored (method NONE) -> create deployment pointing to storage_key
     if method == "NONE" {
-        let dep_body = serde_json::json!({"app_name": app_name, "artifact_url": storage_key});
+    let dep_body = serde_json::json!({"app_name": app_name, "artifact_url": storage_key, "dev_hot": dev_hot});
         let dep_url = format!("{}/deployments", base.trim_end_matches('/'));
         let _ = client.post(&dep_url).json(&dep_body).send().await; // ignore error
         return Ok(storage_key);
@@ -432,7 +433,7 @@ async fn two_phase_upload(artifact:&Path, root:&Path, base:&str, digest:&str, si
     Err(CliError::new(CliErrorKind::Runtime("unsupported presign method".into())).into())
 }
 
-async fn multipart_upload(artifact:&Path, root:&Path, base:&str, digest:&str, sig: Option<PathBuf>) -> Result<String> {
+async fn multipart_upload(artifact:&Path, root:&Path, base:&str, digest:&str, sig: Option<PathBuf>, dev_hot: bool) -> Result<String> {
     let client = reqwest::Client::new();
     let pkg = parse_package_json(root);
     let app_name = pkg.as_ref().and_then(|p| p.name.clone()).unwrap_or_else(|| "default-app".into());
@@ -486,6 +487,10 @@ async fn multipart_upload(artifact:&Path, root:&Path, base:&str, digest:&str, si
     let complete_body = serde_json::json!({"app_name": app_name, "digest": digest, "upload_id": upload_id, "size_bytes": fs::metadata(artifact).map(|m| m.len()).unwrap_or(0) as i64, "parts": parts_json, "signature": signature_hex, "idempotency_key": idempotency_key});
     let resp = client.post(&complete_url).header("X-Aether-Upload-Duration", format!("{:.6}", duration)).json(&complete_body).send().await.map_err(|e| CliError::with_source(CliErrorKind::Runtime("multipart complete failed".into()), e))?;
     if !resp.status().is_success() { return Err(CliError::new(CliErrorKind::Runtime(format!("multipart complete status {}", resp.status()))).into()); }
+    // create deployment referencing stored artifact
+    let dep_body = serde_json::json!({"app_name": app_name, "artifact_url": storage_key, "dev_hot": dev_hot});
+    let dep_url = format!("{}/deployments", base.trim_end_matches('/'));
+    let _ = client.post(&dep_url).json(&dep_body).send().await; // ignore error
     Ok(storage_key)
 }
 

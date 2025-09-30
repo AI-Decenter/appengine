@@ -33,6 +33,10 @@ aws-config = { version = "1", optional = true }
 aws-sdk-s3 = { version = "1", optional = true, default-features = true }
 async-trait = "0.1"
 url = "2"
+regex = "1"
+fastrand = "2"
+rustc-hash = "1.1"
+testcontainers = { version = "0.20", default-features = false, features = ["watchdog"] }
 
 [features]
 default = ["s3"]
@@ -40,6 +44,7 @@ s3 = ["aws-config", "aws-sdk-s3"]
 # Enable lightweight in-memory SQLite for tests (skips S3 specific behavior where not needed).
 sqlite-test = []
 mock-kube = []
+dev-hot-ingest = []
 
 [dev-dependencies]
 proptest = "1"

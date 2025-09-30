@@ -25,7 +25,7 @@ use sqlx::Row;
 // use sqlx::Row; // no longer needed after refactor
 
 #[derive(Deserialize, ToSchema)]
-pub struct CreateDeploymentRequest { pub app_name: String, pub artifact_url: String, pub signature: Option<String> }
+pub struct CreateDeploymentRequest { pub app_name: String, pub artifact_url: String, pub signature: Option<String>, #[serde(default)] pub dev_hot: bool }
 
 #[derive(Serialize, ToSchema)]
 pub struct CreateDeploymentResponse { pub id: Uuid, pub status: &'static str }
@@ -95,9 +95,10 @@ pub async fn create_deployment(State(state): State<AppState>, Json(req): Json<Cr
     let artifact_url = req.artifact_url.clone();
     let digest_opt = resolved_digest.clone();
     let signature = req.signature.clone();
+    let dev_hot = req.dev_hot;
     tokio::spawn(async move {
         let digest = digest_opt.as_deref().unwrap_or("");
-        if let Err(e) = crate::k8s::apply_deployment(&app_name, digest, &artifact_url, "default", signature.as_deref()).await {
+        if let Err(e) = crate::k8s::apply_deployment(&app_name, digest, &artifact_url, "default", signature.as_deref(), dev_hot).await {
             tracing::error!(error=%e, app=%app_name, "k8s apply failed");
         } else {
             tracing::info!(app=%app_name, "k8s apply scheduled");

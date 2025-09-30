@@ -49,6 +49,8 @@ pub enum Commands {
         #[arg(long, default_value = "text")] format: Option<String>,
         /// Dùng lộ trình upload legacy multipart (fallback). Mặc định tắt: CLI sẽ lỗi nếu two-phase thất bại.
     #[arg(long, default_value_t = false)] legacy_upload: bool,
+    /// Bật chế độ dev hot reload (sidecar fetch loop)
+    #[arg(long, default_value_t = false)] dev_hot: bool,
     },
     /// Mock hiển thị log gần nhất
     Logs { #[arg(long)] app: Option<String> },
