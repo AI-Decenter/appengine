@@ -45,21 +45,44 @@ pub static DB_POOL_IN_USE: Lazy<IntGauge> = Lazy::new(|| {
 });
 
 // Dev hot mode metrics (Issue 05 follow-ups)
+// Build metadata label (commit sha) if provided at build time via env! macro fallback to "unknown"
+pub fn build_commit() -> &'static str { option_env!("GIT_COMMIT_SHA").unwrap_or("unknown") }
 pub static DEV_HOT_REFRESH_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
-    let c = IntCounterVec::new(opts!("dev_hot_refresh_total", "Successful dev-hot refreshes"), &["app"]).unwrap();
+    let c = IntCounterVec::new(opts!("dev_hot_refresh_total", "Successful dev-hot refreshes"), &["app","commit"]).unwrap();
     REGISTRY.register(Box::new(c.clone())).ok();
     c
 });
 pub static DEV_HOT_REFRESH_FAILURE_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
-    let c = IntCounterVec::new(opts!("dev_hot_refresh_failure_total", "Failed dev-hot refresh attempts"), &["app","reason"]).unwrap();
+    let c = IntCounterVec::new(opts!("dev_hot_refresh_failure_total", "Failed dev-hot refresh attempts"), &["app","reason","commit"]).unwrap();
     REGISTRY.register(Box::new(c.clone())).ok();
     c
 });
 pub static DEV_HOT_REFRESH_LATENCY: Lazy<prometheus::HistogramVec> = Lazy::new(|| {
-    let h = prometheus::HistogramVec::new(histogram_opts!("dev_hot_refresh_latency_seconds","Time to download and extract new artifact"), &["app"]).unwrap();
+    let h = prometheus::HistogramVec::new(histogram_opts!("dev_hot_refresh_latency_seconds","Time to download and extract new artifact"), &["app","commit"]).unwrap();
     REGISTRY.register(Box::new(h.clone())).ok();
     h
 });
+pub static DEV_HOT_REFRESH_CONSEC_FAIL: Lazy<IntGauge> = Lazy::new(|| {
+    let g = IntGauge::new("dev_hot_refresh_consecutive_failures", "Consecutive dev-hot refresh failures (per observed app) aggregated latest")
+        .unwrap();
+    REGISTRY.register(Box::new(g.clone())).ok();
+    g
+});
+pub static DEV_HOT_SIGNATURE_FAIL_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    let c = IntCounterVec::new(opts!("dev_hot_signature_fail_total", "Dev-hot signature verification failures"), &["app","commit"]).unwrap();
+    REGISTRY.register(Box::new(c.clone())).ok();
+    c
+});
+pub static ATTESTATION_SIGNED_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    let c = IntCounterVec::new(opts!("attestation_signed_total", "DSSE attestations successfully signed"), &["app"]).unwrap();
+    REGISTRY.register(Box::new(c.clone())).ok();
+    c
+});
+
+// Coverage metrics gauges (updated periodically elsewhere)
+pub static ARTIFACTS_WITH_SBOM: Lazy<IntGauge> = Lazy::new(|| { let g = IntGauge::new("artifacts_with_sbom_total", "Artifacts having an SBOM").unwrap(); REGISTRY.register(Box::new(g.clone())).ok(); g });
+pub static ARTIFACTS_WITH_PROVENANCE: Lazy<IntGauge> = Lazy::new(|| { let g = IntGauge::new("artifacts_with_provenance_total", "Artifacts having provenance v2 doc").unwrap(); REGISTRY.register(Box::new(g.clone())).ok(); g });
+pub static ARTIFACTS_SIGNED: Lazy<IntGauge> = Lazy::new(|| { let g = IntGauge::new("artifacts_signed_total", "Artifacts with signature present").unwrap(); REGISTRY.register(Box::new(g.clone())).ok(); g });
 
 pub fn normalize_path(raw: &str) -> String {
     // Broader normalization:

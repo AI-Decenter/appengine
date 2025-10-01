@@ -35,4 +35,5 @@ pub struct Artifact {
 	pub completed_at: Option<DateTime<Utc>>,
 	pub idempotency_key: Option<String>,
 	pub multipart_upload_id: Option<String>,
+	pub provenance_present: Option<bool>,
 }

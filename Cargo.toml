@@ -2,7 +2,9 @@
 members = [
   "crates/aether-cli",
   "crates/control-plane",
-  "crates/operator"
+  "crates/operator",
+  "crates/json-extract",
+  "crates/ed25519-verify"
 ]
 resolver = "2"
 
@@ -43,3 +45,4 @@ toml = "0.8"
 whoami = "1"
 glob = "0.3"
 tokio-util = { version = "0.7", features = ["io"] }
+hex = "0.4"

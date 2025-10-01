@@ -9,6 +9,7 @@ pub mod netfail;
 pub mod iofail;
 pub mod usagefail;
 pub mod runtimefail;
+pub mod dev;
 
 #[derive(clap::ValueEnum, Clone, Debug)]
 pub enum LogFormat { Auto, Text, Json }
@@ -45,6 +46,8 @@ pub enum Commands {
         #[arg(long, default_value_t = false)] no_cache: bool,
         /// Bỏ qua sinh SBOM (tăng tốc) – JSON output vẫn trả path dự kiến nhưng file có thể không tồn tại
         #[arg(long, default_value_t = false)] no_sbom: bool,
+    /// Sinh SBOM theo chuẩn CycloneDX 1.5 JSON thay vì schema nội bộ (đang chuyển đổi)
+    #[arg(long, default_value_t = false)] cyclonedx: bool,
         /// Định dạng output: text|json (json in ra metadata artifact)
         #[arg(long, default_value = "text")] format: Option<String>,
         /// Dùng lộ trình upload legacy multipart (fallback). Mặc định tắt: CLI sẽ lỗi nếu two-phase thất bại.
@@ -71,4 +74,6 @@ pub enum Commands {
     /// Simulate runtime error (hidden, for testing exit codes)
     #[command(hide = true)]
     Runtimefail {},
+    /// Dev loop: watch local source & auto deploy hot (experimental)
+    Dev { #[arg(long, default_value_t=false)] hot: bool, #[arg(long, default_value="500ms")] interval: String },
 }

@@ -82,8 +82,21 @@ async fn verify_signature_if_present(db: &sqlx::Pool<sqlx::Postgres>, app_name: 
 #[utoipa::path(post, path = "/deployments", request_body = CreateDeploymentRequest, responses( (status=201, body=CreateDeploymentResponse), (status=404, body=ApiErrorBody, description="app not found"), (status=400, body=ApiErrorBody), (status=500, body=ApiErrorBody) ))]
 #[tracing::instrument(level="info", skip(state, req), fields(app_name=%req.app_name))]
 pub async fn create_deployment(State(state): State<AppState>, Json(req): Json<CreateDeploymentRequest>) -> ApiResult<(StatusCode, Json<CreateDeploymentResponse>)> {
+    let require_sig = std::env::var("AETHER_REQUIRE_SIGNATURE").unwrap_or_default() == "1";
+    if require_sig && req.signature.is_none() { return Err(ApiError::bad_request("signature required")); }
     let resolved_digest = resolve_digest(&state.db, &req.artifact_url).await;
     verify_signature_if_present(&state.db, &req.app_name, resolved_digest.as_deref(), &req.signature).await?;
+    // SBOM enforcement: if enabled and digest resolved, ensure sbom_url populated
+    if std::env::var("AETHER_ENFORCE_SBOM").unwrap_or_default() == "1" {
+        if let Some(d) = resolved_digest.as_deref() {
+            if let Ok(Some(row)) = sqlx::query_as::<_, (Option<String>,)>("SELECT sbom_url FROM artifacts WHERE digest=$1")
+                .bind(d).fetch_optional(&state.db).await {
+                if row.0.is_none() { return Err(ApiError::bad_request("SBOM required for deployment (AETHER_ENFORCE_SBOM=1)")); }
+            } else {
+                return Err(ApiError::bad_request("artifact digest not found for SBOM enforcement"));
+            }
+        }
+    }
     let deployment: Deployment = services::deployments::create_deployment(&state.db, &req.app_name, &req.artifact_url, resolved_digest.as_deref(), req.signature.as_deref())
         .await.map_err(|e| {
             if matches!(e, sqlx::Error::RowNotFound) { return ApiError::not_found("application not found"); }
@@ -102,6 +115,12 @@ pub async fn create_deployment(State(state): State<AppState>, Json(req): Json<Cr
             tracing::error!(error=%e, app=%app_name, "k8s apply failed");
         } else {
             tracing::info!(app=%app_name, "k8s apply scheduled");
+            if let Err(e) = crate::provenance::write_provenance(&app_name, digest, signature.is_some()) { tracing::warn!(error=%e, app=%app_name, "provenance_write_failed"); } else {
+                // best-effort flag set
+                let _ = sqlx::query("UPDATE artifacts SET provenance_present=TRUE WHERE digest=$1")
+                    .bind(digest)
+                    .execute(&state.db).await;
+            }
         }
     });
     Ok((StatusCode::CREATED, Json(CreateDeploymentResponse { id: deployment.id, status: "pending" })))
