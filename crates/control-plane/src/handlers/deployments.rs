@@ -86,6 +86,17 @@ pub async fn create_deployment(State(state): State<AppState>, Json(req): Json<Cr
     if require_sig && req.signature.is_none() { return Err(ApiError::bad_request("signature required")); }
     let resolved_digest = resolve_digest(&state.db, &req.artifact_url).await;
     verify_signature_if_present(&state.db, &req.app_name, resolved_digest.as_deref(), &req.signature).await?;
+    // SBOM enforcement: if enabled and digest resolved, ensure sbom_url populated
+    if std::env::var("AETHER_ENFORCE_SBOM").unwrap_or_default() == "1" {
+        if let Some(d) = resolved_digest.as_deref() {
+            if let Ok(Some(row)) = sqlx::query_as::<_, (Option<String>,)>("SELECT sbom_url FROM artifacts WHERE digest=$1")
+                .bind(d).fetch_optional(&state.db).await {
+                if row.0.is_none() { return Err(ApiError::bad_request("SBOM required for deployment (AETHER_ENFORCE_SBOM=1)")); }
+            } else {
+                return Err(ApiError::bad_request("artifact digest not found for SBOM enforcement"));
+            }
+        }
+    }
     let deployment: Deployment = services::deployments::create_deployment(&state.db, &req.app_name, &req.artifact_url, resolved_digest.as_deref(), req.signature.as_deref())
         .await.map_err(|e| {
             if matches!(e, sqlx::Error::RowNotFound) { return ApiError::not_found("application not found"); }

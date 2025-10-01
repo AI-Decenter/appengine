@@ -32,7 +32,7 @@ pub async fn handle(hot: bool, interval: String) -> Result<()> {
         if cur != last_digest {
             info!(old=%last_digest, new=%cur, "change_detected_packaging");
             // Deploy with pack_only to skip installs, no_sbom for speed, dev_hot flag if hot
-            match deploy_handle(DeployOptions { dry_run:false, pack_only:true, compression_level:6, out:None, no_upload:false, no_cache:true, no_sbom:true, format:None, use_legacy_upload:false, dev_hot:hot }).await {
+            match deploy_handle(DeployOptions { dry_run:false, pack_only:true, compression_level:6, out:None, no_upload:false, no_cache:true, no_sbom:true, cyclonedx:false, format:None, use_legacy_upload:false, dev_hot:hot }).await {
                 Ok(()) => { last_digest = cur; }
                 Err(e) => warn!(error=%e, "dev_deploy_failed"),
             }

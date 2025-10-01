@@ -39,13 +39,14 @@ pub struct DeployOptions {
     pub no_upload: bool,
     pub no_cache: bool,
     pub no_sbom: bool,
+    pub cyclonedx: bool,
     pub format: Option<String>,
     pub use_legacy_upload: bool,
     pub dev_hot: bool,
 }
 
 pub async fn handle(opts: DeployOptions) -> Result<()> {
-    let DeployOptions { dry_run, pack_only, compression_level, out, no_upload, no_cache, no_sbom, format, use_legacy_upload, dev_hot } = opts;
+    let DeployOptions { dry_run, pack_only, compression_level, out, no_upload, no_cache, no_sbom, cyclonedx, format, use_legacy_upload, dev_hot } = opts;
     let root = Path::new(".");
     if !is_node_project(root) { return Err(CliError::new(CliErrorKind::Usage("not a NodeJS project (missing package.json)".into())).into()); }
     if dry_run { info!(event="deploy.dry_run", msg="Would run install + prune + package project"); return Ok(()); }
@@ -79,7 +80,7 @@ pub async fn handle(opts: DeployOptions) -> Result<()> {
 
     create_artifact(root, &paths, &artifact_name, compression_level)?;
     write_manifest(&artifact_name, &manifest)?;
-    if !no_sbom { generate_sbom(root, &artifact_name, &manifest)?; } else { info!(event="deploy.sbom", status="skipped_no_sbom_flag"); }
+    if !no_sbom { generate_sbom(root, &artifact_name, &manifest, cyclonedx)?; } else { info!(event="deploy.sbom", status="skipped_no_sbom_flag"); }
     let size = fs::metadata(&artifact_name).map(|m| m.len()).unwrap_or(0);
     let digest_clone = digest.clone();
     let sig_path = artifact_name.with_file_name(format!("{}.sig", artifact_name.file_name().and_then(|s| s.to_str()).unwrap_or("artifact")));
@@ -87,7 +88,7 @@ pub async fn handle(opts: DeployOptions) -> Result<()> {
     let manifest_path = artifact_name.with_file_name(format!("{}.manifest.json", artifact_name.file_name().and_then(|s| s.to_str()).unwrap_or("artifact.tar.gz")));
     if format.as_deref()==Some("json") {
         #[derive(Serialize)] struct Out<'a> { artifact: &'a str, digest: &'a str, size_bytes: u64, manifest: String, sbom: Option<String>, signature: Option<String> }
-        let o = Out { artifact: &artifact_name.to_string_lossy(), digest: &digest_clone, size_bytes: size, manifest: manifest_path.to_string_lossy().to_string(), sbom: if no_sbom { None } else { Some(sbom_path.to_string_lossy().to_string()) }, signature: sig_path.exists().then(|| sig_path.to_string_lossy().to_string()) };
+    let o = Out { artifact: &artifact_name.to_string_lossy(), digest: &digest_clone, size_bytes: size, manifest: manifest_path.to_string_lossy().to_string(), sbom: if no_sbom { None } else { Some(sbom_path.to_string_lossy().to_string()) }, signature: sig_path.exists().then(|| sig_path.to_string_lossy().to_string()) };
         println!("{}", serde_json::to_string_pretty(&o)?);
     } else {
         println!("Artifact created: {} ({} bytes)", artifact_name.display(), size); // user-facing
@@ -283,30 +284,42 @@ fn parse_package_json(root:&Path)->Option<PackageJson> {
     serde_json::from_str(&content).ok()
 }
 
-fn generate_sbom(root:&Path, artifact:&Path, manifest:&Manifest) -> Result<()> {
+fn generate_sbom(root:&Path, artifact:&Path, manifest:&Manifest, cyclonedx: bool) -> Result<()> {
     let pkg = parse_package_json(root);
-    #[derive(Serialize)] struct Dependency<'a> { name: &'a str, spec: String }
-    #[derive(Serialize)] struct Sbom<'a> {
-        schema: &'a str,
-        package: Option<String>,
-        version: Option<String>,
-        total_files: usize,
-        total_size: u64,
-        manifest_digest: String,
-        files: &'a [ManifestEntry],
-        dependencies: Vec<Dependency<'a>>,
-    }
-    let mut deps = Vec::new();
+    // Common dependency extraction from package.json
+    let mut deps_vec: Vec<(String,String)> = Vec::new();
     if let Some(map) = pkg.as_ref().and_then(|p| p.dependencies.as_ref()) {
-        for (k,v) in map.iter() { if let Some(spec)=v.as_str() { deps.push(Dependency { name: k, spec: spec.to_string() }); } }
+        for (k,v) in map.iter() { if let Some(spec)=v.as_str() { deps_vec.push((k.clone(), spec.to_string())); } }
     }
     let mut h = Sha256::new();
     for f in &manifest.files { h.update(f.path.as_bytes()); h.update(f.sha256.as_bytes()); }
     let manifest_digest = format!("{:x}", h.finalize());
-    let sbom = Sbom { schema: "aether-sbom-v1", package: pkg.as_ref().and_then(|p| p.name.clone()), version: pkg.as_ref().and_then(|p| p.version.clone()), total_files: manifest.total_files, total_size: manifest.total_size, manifest_digest, files: &manifest.files, dependencies: deps };
     let path = artifact.with_file_name(format!("{}.sbom.json", artifact.file_name().and_then(|s| s.to_str()).unwrap_or("artifact")));
-    fs::write(&path, serde_json::to_vec_pretty(&sbom)?)?;
-    info!(event="deploy.sbom", path=%path.display(), files=manifest.total_files);
+    if cyclonedx {
+        // Minimal CycloneDX 1.5 JSON structure
+        #[derive(Serialize)] struct HashObj { alg: &'static str, content: String }
+        #[derive(Serialize)] struct Component { #[serde(rename="type")] ctype: &'static str, name: String, version: Option<String>, hashes: Vec<HashObj>, purl: Option<String> }
+        #[derive(Serialize)] struct MetadataComponent { #[serde(rename="type")] ctype: &'static str, name: String, version: Option<String> }
+        #[derive(Serialize)] struct Metadata { component: MetadataComponent }
+        #[derive(Serialize)] struct Cyclone<'a> { bomFormat: &'static str, specVersion: &'static str, serialNumber: String, version: u32, metadata: Metadata, components: Vec<Component>, #[serde(skip_serializing_if="Vec::is_empty")] dependencies: Vec<serde_json::Value>, #[serde(rename="x-manifest-digest")] manifest_digest: &'a str, #[serde(rename="x-total-files")] total_files: usize, #[serde(rename="x-total-size")] total_size: u64 }
+        let name = pkg.as_ref().and_then(|p| p.name.clone()).unwrap_or_else(|| "app".into());
+        let version = pkg.as_ref().and_then(|p| p.version.clone());
+        let serial = format!("urn:uuid:{}", uuid::Uuid::new_v4());
+        // Each dependency as library component without hashes (could be enriched later)
+        let mut components: Vec<Component> = deps_vec.iter().map(|(n,spec)| Component { ctype: "library", name: n.clone(), version: Some(spec.clone()), hashes: vec![], purl: None }).collect();
+        // Root application component with manifest digest as hash (custom extension)
+        components.push(Component { ctype: "application", name: name.clone(), version: version.clone(), hashes: vec![HashObj { alg: "SHA-256", content: manifest_digest.clone() }], purl: None });
+        let doc = Cyclone { bomFormat: "CycloneDX", specVersion: "1.5", serialNumber: serial, version: 1, metadata: Metadata { component: MetadataComponent { ctype: "application", name, version: version.clone() } }, components, dependencies: vec![], manifest_digest: &manifest_digest, total_files: manifest.total_files, total_size: manifest.total_size };
+        fs::write(&path, serde_json::to_vec_pretty(&doc)?)?;
+        info!(event="deploy.sbom", format="cyclonedx", path=%path.display(), files=manifest.total_files);
+    } else {
+        #[derive(Serialize)] struct Dependency<'a> { name: &'a str, spec: String }
+        #[derive(Serialize)] struct Sbom<'a> { schema: &'a str, package: Option<String>, version: Option<String>, total_files: usize, total_size: u64, manifest_digest: String, files: &'a [ManifestEntry], dependencies: Vec<Dependency<'a>> }
+        let dependencies: Vec<Dependency> = deps_vec.iter().map(|(n,s)| Dependency { name: n, spec: s.clone() }).collect();
+        let sbom = Sbom { schema: "aether-sbom-v1", package: pkg.as_ref().and_then(|p| p.name.clone()), version: pkg.as_ref().and_then(|p| p.version.clone()), total_files: manifest.total_files, total_size: manifest.total_size, manifest_digest, files: &manifest.files, dependencies };
+        fs::write(&path, serde_json::to_vec_pretty(&sbom)?)?;
+        info!(event="deploy.sbom", format="legacy", path=%path.display(), files=manifest.total_files);
+    }
     Ok(())
 }
 
@@ -417,6 +430,16 @@ async fn two_phase_upload(artifact:&Path, root:&Path, base:&str, digest:&str, si
         let complete_body = serde_json::json!({"app_name": app_name, "digest": digest, "size_bytes": size_bytes, "signature": signature_hex, "idempotency_key": idempotency_key});
         let comp_resp = client.post(&complete_url).header("X-Aether-Upload-Duration", format!("{:.6}", put_duration)).json(&complete_body).send().await.map_err(|e| CliError::with_source(CliErrorKind::Runtime("complete request failed".into()), e))?;
         if !comp_resp.status().is_success() { return Err(CliError::new(CliErrorKind::Runtime(format!("complete status {}", comp_resp.status()))).into()); }
+        // Attempt SBOM upload (best-effort) if file exists
+        if let Some(sbom_path) = artifact.with_file_name(format!("{}.sbom.json", artifact.file_name().and_then(|s| s.to_str()).unwrap_or("artifact"))).to_str().map(|s| PathBuf::from(s)) {
+            if sbom_path.exists() {
+                let sbom_url = format!("{}/artifacts/{}/sbom", base.trim_end_matches('/'), digest);
+                if let Ok(content) = tokio::fs::read(&sbom_path).await {
+                    let ct = if std::env::var("AETHER_SBOM_CYCLONEDX").ok().as_deref()==Some("1") { "application/vnd.cyclonedx+json" } else { "application/json" };
+                    let _ = client.post(&sbom_url).header("Content-Type", ct).body(content).send().await; // ignore errors
+                }
+            }
+        }
         // Optionally create deployment referencing storage key
     let dep_body = serde_json::json!({"app_name": app_name, "artifact_url": storage_key, "dev_hot": dev_hot});
         let dep_url = format!("{}/deployments", base.trim_end_matches('/'));
