@@ -288,7 +288,6 @@ fn parse_package_json(root:&Path)->Option<PackageJson> {
 fn generate_sbom(root:&Path, artifact:&Path, manifest:&Manifest, cyclonedx: bool) -> Result<()> {
     let pkg = parse_package_json(root);
     // Optional package-lock.json ingestion for real dependency integrity (npm style)
-    #[derive(Deserialize)] struct PackageLock { #[serde(default)] packages: serde_json::Map<String, serde_json::Value> }
     let mut lock_integrities: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     if let Ok(lock_content) = fs::read_to_string(root.join("package-lock.json")) {
         if let Ok(lock_json) = serde_json::from_str::<serde_json::Value>(&lock_content) {
@@ -337,7 +336,7 @@ fn generate_sbom(root:&Path, artifact:&Path, manifest:&Manifest, cyclonedx: bool
                     // Scope handling (@scope/pkg)
                     let dep_name = if first.starts_with('@') { format!("{}/{}", first, segs.next().unwrap_or("")) } else { first.to_string() };
                     if dep_name.is_empty() { continue; }
-                    let hasher = dep_hashes.entry(dep_name).or_insert_with(Sha256::new);
+                    let hasher = dep_hashes.entry(dep_name).or_default();
                     hasher.update(f.sha256.as_bytes());
                 }
             }

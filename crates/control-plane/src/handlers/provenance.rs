@@ -22,7 +22,7 @@ pub async fn get_provenance(State(_state): State<AppState>, Path(digest): Path<S
     // app name unknown -> search first match
     let path_glob = format!("{}/*-{}.prov2.json", dir, digest);
     let mut found: Option<PathBuf> = None;
-    if let Ok(entries) = glob::glob(&path_glob) { for e in entries.flatten() { found = Some(e); break; } }
+    if let Ok(entries) = glob::glob(&path_glob) { if let Some(e) = entries.flatten().next() { found = Some(e); } }
     let Some(p) = found else { return Err(ApiError::not_found("provenance not found")); };
     let bytes = std::fs::read(&p).map_err(|e| ApiError::internal(format!("read: {e}")))?;
     Ok((StatusCode::OK, bytes))
@@ -32,7 +32,7 @@ pub async fn get_attestation(State(_state): State<AppState>, Path(digest): Path<
     let dir = std::env::var("AETHER_PROVENANCE_DIR").unwrap_or_else(|_| "/tmp/provenance".into());
     let path_glob = format!("{}/*-{}.prov2.dsse.json", dir, digest);
     let mut found: Option<PathBuf> = None;
-    if let Ok(entries) = glob::glob(&path_glob) { for e in entries.flatten() { found = Some(e); break; } }
+    if let Ok(entries) = glob::glob(&path_glob) { if let Some(e) = entries.flatten().next() { found = Some(e); } }
     let Some(p) = found else { return Err(ApiError::not_found("attestation not found")); };
     let bytes = std::fs::read(&p).map_err(|e| ApiError::internal(format!("read: {e}")))?;
     Ok((StatusCode::OK, bytes))
