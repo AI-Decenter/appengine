@@ -115,7 +115,12 @@ pub async fn create_deployment(State(state): State<AppState>, Json(req): Json<Cr
             tracing::error!(error=%e, app=%app_name, "k8s apply failed");
         } else {
             tracing::info!(app=%app_name, "k8s apply scheduled");
-            if let Err(e) = crate::provenance::write_provenance(&app_name, digest, signature.is_some()) { tracing::warn!(error=%e, app=%app_name, "provenance_write_failed"); }
+            if let Err(e) = crate::provenance::write_provenance(&app_name, digest, signature.is_some()) { tracing::warn!(error=%e, app=%app_name, "provenance_write_failed"); } else {
+                // best-effort flag set
+                let _ = sqlx::query("UPDATE artifacts SET provenance_present=TRUE WHERE digest=$1")
+                    .bind(digest)
+                    .execute(&state.db).await;
+            }
         }
     });
     Ok((StatusCode::CREATED, Json(CreateDeploymentResponse { id: deployment.id, status: "pending" })))

@@ -73,6 +73,16 @@ pub static DEV_HOT_SIGNATURE_FAIL_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     REGISTRY.register(Box::new(c.clone())).ok();
     c
 });
+pub static ATTESTATION_SIGNED_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    let c = IntCounterVec::new(opts!("attestation_signed_total", "DSSE attestations successfully signed"), &["app"]).unwrap();
+    REGISTRY.register(Box::new(c.clone())).ok();
+    c
+});
+
+// Coverage metrics gauges (updated periodically elsewhere)
+pub static ARTIFACTS_WITH_SBOM: Lazy<IntGauge> = Lazy::new(|| { let g = IntGauge::new("artifacts_with_sbom_total", "Artifacts having an SBOM").unwrap(); REGISTRY.register(Box::new(g.clone())).ok(); g });
+pub static ARTIFACTS_WITH_PROVENANCE: Lazy<IntGauge> = Lazy::new(|| { let g = IntGauge::new("artifacts_with_provenance_total", "Artifacts having provenance v2 doc").unwrap(); REGISTRY.register(Box::new(g.clone())).ok(); g });
+pub static ARTIFACTS_SIGNED: Lazy<IntGauge> = Lazy::new(|| { let g = IntGauge::new("artifacts_signed_total", "Artifacts with signature present").unwrap(); REGISTRY.register(Box::new(g.clone())).ok(); g });
 
 pub fn normalize_path(raw: &str) -> String {
     // Broader normalization:

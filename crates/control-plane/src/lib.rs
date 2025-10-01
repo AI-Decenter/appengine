@@ -112,6 +112,23 @@ pub fn build_router(state: AppState) -> Router {
             crate::k8s_watch::run_deployment_status_watcher(db_status).await;
         });
     }
+    // Coverage metrics updater (not gated by watch disable)
+    if std::env::var("AETHER_DISABLE_BACKGROUND").ok().as_deref() != Some("1") {
+        let db_metrics = state.db.clone();
+        tokio::spawn(async move {
+            use crate::telemetry::{ARTIFACTS_WITH_SBOM, ARTIFACTS_SIGNED, ARTIFACTS_WITH_PROVENANCE};
+            loop {
+                // counts
+                let sbom: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM artifacts WHERE sbom_url IS NOT NULL").fetch_one(&db_metrics).await.unwrap_or(0);
+                let signed: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM artifacts WHERE signature IS NOT NULL").fetch_one(&db_metrics).await.unwrap_or(0);
+                let prov: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM artifacts WHERE provenance_present=TRUE").fetch_one(&db_metrics).await.unwrap_or(0);
+                ARTIFACTS_WITH_SBOM.set(sbom as i64);
+                ARTIFACTS_SIGNED.set(signed as i64);
+                ARTIFACTS_WITH_PROVENANCE.set(prov as i64);
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            }
+        });
+    }
     Router::new()
         .route("/health", get(health))
     .route("/readyz", get(readiness))
@@ -128,6 +145,9 @@ pub fn build_router(state: AppState) -> Router {
     .route("/artifacts/:digest", axum::routing::head(head_artifact))
     .route("/artifacts/:digest/meta", get(handlers::uploads::artifact_meta))
         .route("/artifacts/:digest/sbom", get(handlers::artifacts::get_sbom).post(handlers::artifacts::upload_sbom))
+    .route("/provenance", get(handlers::provenance::list_provenance))
+    .route("/provenance/:digest", get(handlers::provenance::get_provenance))
+    .route("/provenance/:digest/attestation", get(handlers::provenance::get_attestation))
         .route("/apps", post(create_app))
         .route("/apps", get(list_apps))
         .route("/apps/:app_name/deployments", get(app_deployments))
