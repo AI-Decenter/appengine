@@ -127,6 +127,7 @@ pub fn build_router(state: AppState) -> Router {
     .route("/artifacts/multipart/complete", post(multipart_complete))
     .route("/artifacts/:digest", axum::routing::head(head_artifact))
     .route("/artifacts/:digest/meta", get(handlers::uploads::artifact_meta))
+            .route("/artifacts/:digest/sbom", get(handlers::artifacts::get_sbom))
         .route("/apps", post(create_app))
         .route("/apps", get(list_apps))
         .route("/apps/:app_name/deployments", get(app_deployments))

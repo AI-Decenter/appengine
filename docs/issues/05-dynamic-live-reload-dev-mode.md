@@ -89,5 +89,9 @@ TIẾP THEO:
  - [x] Signature E2E harness
  - [x] Supervisor basic graceful restart loop (digest-driven)
  - [x] Dedicated signature failure metric
+ - [x] Server-side signature enforcement flag (AETHER_REQUIRE_SIGNATURE)
+ - [x] Basic provenance document emission
+ - [x] SBOM serving endpoint (linkage groundwork for provenance)
+ - [x] Multi-namespace ingestion flag (AETHER_DEV_HOT_MULTI_NS)
 
 ````

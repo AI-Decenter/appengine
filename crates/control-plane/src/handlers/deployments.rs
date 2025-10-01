@@ -82,6 +82,8 @@ async fn verify_signature_if_present(db: &sqlx::Pool<sqlx::Postgres>, app_name: 
 #[utoipa::path(post, path = "/deployments", request_body = CreateDeploymentRequest, responses( (status=201, body=CreateDeploymentResponse), (status=404, body=ApiErrorBody, description="app not found"), (status=400, body=ApiErrorBody), (status=500, body=ApiErrorBody) ))]
 #[tracing::instrument(level="info", skip(state, req), fields(app_name=%req.app_name))]
 pub async fn create_deployment(State(state): State<AppState>, Json(req): Json<CreateDeploymentRequest>) -> ApiResult<(StatusCode, Json<CreateDeploymentResponse>)> {
+    let require_sig = std::env::var("AETHER_REQUIRE_SIGNATURE").unwrap_or_default() == "1";
+    if require_sig && req.signature.is_none() { return Err(ApiError::bad_request("signature required")); }
     let resolved_digest = resolve_digest(&state.db, &req.artifact_url).await;
     verify_signature_if_present(&state.db, &req.app_name, resolved_digest.as_deref(), &req.signature).await?;
     let deployment: Deployment = services::deployments::create_deployment(&state.db, &req.app_name, &req.artifact_url, resolved_digest.as_deref(), req.signature.as_deref())
