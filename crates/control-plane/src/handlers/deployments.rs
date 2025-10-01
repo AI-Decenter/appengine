@@ -102,6 +102,7 @@ pub async fn create_deployment(State(state): State<AppState>, Json(req): Json<Cr
             tracing::error!(error=%e, app=%app_name, "k8s apply failed");
         } else {
             tracing::info!(app=%app_name, "k8s apply scheduled");
+            if let Err(e) = crate::provenance::write_provenance(&app_name, digest, signature.is_some()) { tracing::warn!(error=%e, app=%app_name, "provenance_write_failed"); }
         }
     });
     Ok((StatusCode::CREATED, Json(CreateDeploymentResponse { id: deployment.id, status: "pending" })))

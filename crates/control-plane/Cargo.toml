@@ -52,4 +52,5 @@ serial_test = "3"
 rand = "0.8"
 futures = "0.3"
 reqwest = { workspace = true }
+tempfile = "3"
 

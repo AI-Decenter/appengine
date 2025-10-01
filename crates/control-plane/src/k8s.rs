@@ -125,7 +125,7 @@ ready_set() { touch /workspace/.ready 2>/dev/null || true; }
 ready_clear() { rm -f /workspace/.ready 2>/dev/null || true; }
 ready_set # mark ready initially (until first update logic decides otherwise)
 
-# Ensure supervisor script exists (graceful restart on digest change)
+# Ensure supervisor script exists (graceful restart on digest change + readiness drain)
 SUPERVISOR=/workspace/supervisor.sh
 if [ ! -f "$SUPERVISOR" ]; then
 cat > $SUPERVISOR <<'EOS'
@@ -134,23 +134,29 @@ set -euo pipefail
 APP_CMD="node server.js"
 STATE=.devhot_state
 CUR=""
+GRACE=${AETHER_SUPERVISOR_GRACE_SEC:-3}
 if [ -f "$STATE" ]; then CUR=$(grep '^CUR=' "$STATE" | head -n1 | cut -d= -f2 || true); fi
-echo "[supervisor] starting with digest=$CUR"
-while true; do
+echo "[supervisor] starting with digest=$CUR grace=${GRACE}s"
+run_child() {
     sh -c "$APP_CMD" &
-    PID=$!
-    while kill -0 $PID 2>/dev/null; do
+    CHILD=$!
+    trap 'echo "[supervisor] SIGTERM -> draining"; rm -f /workspace/.ready; kill $CHILD 2>/dev/null || true; wait $CHILD 2>/dev/null || true; exit 0' TERM INT
+    while kill -0 $CHILD 2>/dev/null; do
         NEW=$(grep '^CUR=' "$STATE" | head -n1 | cut -d= -f2 2>/dev/null || true)
         if [ -n "$NEW" ] && [ "$NEW" != "$CUR" ]; then
-             echo "[supervisor] digest change $CUR -> $NEW restarting"
-             kill $PID 2>/dev/null || true
-             wait $PID 2>/dev/null || true
-             CUR=$NEW
-             break
+                echo "[supervisor] digest change $CUR -> $NEW draining readiness"
+                rm -f /workspace/.ready 2>/dev/null || true
+                sleep $GRACE
+                kill $CHILD 2>/dev/null || true
+                wait $CHILD 2>/dev/null || true
+                CUR=$NEW
+                return 0
         fi
         sleep 1
     done
-done
+    return 0
+}
+while true; do run_child; done
 EOS
 chmod +x $SUPERVISOR
 fi
