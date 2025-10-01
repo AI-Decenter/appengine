@@ -9,6 +9,7 @@ pub mod netfail;
 pub mod iofail;
 pub mod usagefail;
 pub mod runtimefail;
+pub mod dev;
 
 #[derive(clap::ValueEnum, Clone, Debug)]
 pub enum LogFormat { Auto, Text, Json }
@@ -71,4 +72,6 @@ pub enum Commands {
     /// Simulate runtime error (hidden, for testing exit codes)
     #[command(hide = true)]
     Runtimefail {},
+    /// Dev loop: watch local source & auto deploy hot (experimental)
+    Dev { #[arg(long, default_value_t=false)] hot: bool, #[arg(long, default_value="500ms")] interval: String },
 }

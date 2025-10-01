@@ -37,6 +37,7 @@ tokio-util = { workspace = true }
 indicatif = "0.17"
 async-stream = "0.3"
 bytes = "1"
+humantime = "2"
 
 [[bench]]
 name = "pack_bench"

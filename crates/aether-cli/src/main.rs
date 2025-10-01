@@ -40,6 +40,7 @@ async fn dispatch(cli: Cli, _cfg: EffectiveConfig) -> Result<()> {
         Commands::Iofail {} => { let _span = info_span!("cmd.iofail"); commands::iofail::handle().await }
         Commands::Usagefail {} => { let _span = info_span!("cmd.usagefail"); commands::usagefail::handle().await }
         Commands::Runtimefail {} => { let _span = info_span!("cmd.runtimefail"); commands::runtimefail::handle().await }
+        Commands::Dev { hot, interval } => { let _span = info_span!("cmd.dev", hot, interval); commands::dev::handle(hot, interval).await }
     };
     let took_d = start.elapsed();
     let took_ms = took_d.as_millis();

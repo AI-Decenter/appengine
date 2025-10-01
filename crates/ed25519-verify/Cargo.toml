@@ -1,0 +1,10 @@
+[package]
+name = "ed25519-verify"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = { workspace = true }
+ed25519-dalek = { workspace = true }
+hex = { workspace = true }
+clap = { workspace = true }
