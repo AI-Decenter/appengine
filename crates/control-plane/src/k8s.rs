@@ -62,7 +62,7 @@ fn build_deployment_manifest(app: &str, digest: &str, artifact_url: &str, namesp
     // Containers differ if dev_hot enabled: add fetcher sidecar polling pod annotations for new digest
     let (init_containers, containers) = if dev_hot {
                 let fetch_script = r#"set -euo pipefail
-# Standardized dev-hot log markers for external metrics tailing:
+# Standardized dev-hot log markers:
 # REFRESH_OK app=<pod> digest=<digest> ms=<duration_ms>
 # REFRESH_FAIL app=<pod> reason=<reason> ms=<duration_ms>
 API="https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}"
@@ -70,34 +70,65 @@ TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
 NS=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace)
 POD=$(hostname)
 CUR=""
+BASE_BACKOFF_MS=500
+MAX_BACKOFF_MS=5000
+FAILURES=0
 INTERVAL="${AETHER_FETCH_INTERVAL_SEC:-5}"
-echo "[fetcher] dev-hot sidecar started (interval=${INTERVAL}s)"
+echo "[fetcher] dev-hot sidecar started interval=${INTERVAL}s"
+json_field() { # naive JSON string field extractor: json_field "$1" key
+    echo "$1" | sed -n "s/.*\"$2\":\"\([^"]*\)\".*/\1/p" | head -n1 || true
+}
 while true; do
+    START_LOOP=$(date +%s%3N || date +%s000)
     POD_JSON=$(wget -q -O - --header="Authorization: Bearer $TOKEN" --no-check-certificate "$API/api/v1/namespaces/$NS/pods/$POD" || true)
-    DIGEST=$(echo "$POD_JSON" | grep -o '"aether.dev/digest":"sha256:[^"]*"' | sed -e 's/.*"sha256://' -e 's/"$//')
-    ART=$(echo "$POD_JSON" | grep -o '"aether.dev/artifact-url":"[^"]*"' | sed -e 's/.*"aether.dev\/artifact-url":"//' -e 's/"$//')
-    if [ -n "$DIGEST" ] && [ ${#DIGEST} -eq 64 ] && [ "$DIGEST" != "$CUR" ]; then
-        if [ -z "$ART" ]; then
-            echo "[fetcher] digest $DIGEST detected but artifact URL empty"; sleep "$INTERVAL"; continue;
+    if [ -z "$POD_JSON" ]; then
+        echo "[fetcher] empty pod json"; FAILURES=$((FAILURES+1));
+    else
+        RAW_DIGEST=$(json_field "$POD_JSON" "aether.dev/digest" || true)
+        RAW_ART=$(json_field "$POD_JSON" "aether.dev/artifact-url" || true)
+        DIGEST=""; ART=""
+        if [ -n "$RAW_DIGEST" ] && echo "$RAW_DIGEST" | grep -q '^sha256:'; then
+            DIGEST=$(echo "$RAW_DIGEST" | sed 's/^sha256://')
         fi
-        echo "[fetcher] New digest $DIGEST -> fetching artifact $ART"
-        START_MS=$(date +%s%3N || date +%s000)
-        if wget -q -O /workspace/app.tar.gz "$ART"; then
-            if echo "$DIGEST  /workspace/app.tar.gz" | sha256sum -c - >/dev/null 2>&1; then
-                tar -xzf /workspace/app.tar.gz -C /workspace || { echo "[fetcher] extract failed"; sleep "$INTERVAL"; continue; }
-                CUR="$DIGEST"
-                END_MS=$(date +%s%3N || date +%s000); DUR=$((END_MS-START_MS))
-                echo "[fetcher] updated to $DIGEST (took ${DUR}ms)"; echo "REFRESH_OK app=$POD digest=$DIGEST ms=$DUR"
+        ART="$RAW_ART"
+        if [ -n "$DIGEST" ] && [ ${#DIGEST} -eq 64 ] && [ "$DIGEST" != "$CUR" ]; then
+            if [ -z "$ART" ]; then
+                echo "[fetcher] digest $DIGEST but artifact URL empty"; FAILURES=$((FAILURES+1));
             else
-                END_MS=$(date +%s%3N || date +%s000); DUR=$((END_MS-START_MS))
-                echo "[fetcher] checksum mismatch for $ART (expected $DIGEST)"; echo "REFRESH_FAIL app=$POD reason=checksum ms=$DUR";
+                echo "[fetcher] New digest $DIGEST -> fetching $ART"; START_MS=$(date +%s%3N || date +%s000)
+                if wget -q -O /workspace/app.tar.gz "$ART"; then
+                    if echo "$DIGEST  /workspace/app.tar.gz" | sha256sum -c - >/dev/null 2>&1; then
+                        if tar -xzf /workspace/app.tar.gz -C /workspace; then
+                            CUR="$DIGEST"; END_MS=$(date +%s%3N || date +%s000); DUR=$((END_MS-START_MS))
+                            echo "[fetcher] updated to $DIGEST (${DUR}ms)"; echo "REFRESH_OK app=$POD digest=$DIGEST ms=$DUR"; FAILURES=0
+                        else
+                            END_MS=$(date +%s%3N || date +%s000); DUR=$((END_MS-START_MS))
+                            echo "[fetcher] extract failed"; echo "REFRESH_FAIL app=$POD reason=extract ms=$DUR"; FAILURES=$((FAILURES+1))
+                        fi
+                    else
+                        END_MS=$(date +%s%3N || date +%s000); DUR=$((END_MS-START_MS))
+                        echo "[fetcher] checksum mismatch (expected $DIGEST)"; echo "REFRESH_FAIL app=$POD reason=checksum ms=$DUR"; FAILURES=$((FAILURES+1))
+                    fi
+                else
+                    END_MS=$(date +%s%3N || date +%s000); DUR=$((END_MS-START_MS))
+                    echo "[fetcher] download failed $ART"; echo "REFRESH_FAIL app=$POD reason=download ms=$DUR"; FAILURES=$((FAILURES+1))
+                fi
             fi
-        else
-            END_MS=$(date +%s%3N || date +%s000); DUR=$((END_MS-START_MS))
-            echo "[fetcher] download failed for $ART"; echo "REFRESH_FAIL app=$POD reason=download ms=$DUR";
         fi
     fi
-    sleep "$INTERVAL"
+    # backoff on consecutive failures (jitter ~33%) else sleep fixed interval
+    if [ $FAILURES -gt 0 ]; then
+        POW=$FAILURES; if [ $POW -gt 6 ]; then POW=6; fi
+        # compute 2^POW
+        B=1; for _ in $(seq 1 $POW); do B=$((B*2)); done
+        DELAY=$((BASE_BACKOFF_MS * B)); if [ $DELAY -gt $MAX_BACKOFF_MS ]; then DELAY=$MAX_BACKOFF_MS; fi
+        JITTER=$(( (RANDOM % (DELAY/3 + 1)) ))
+        SLEEP=$((DELAY + JITTER))
+        echo "[fetcher] failures=$FAILURES backoff=${SLEEP}ms"
+        sleep $(awk "BEGIN { printf \"%.3f\", $SLEEP/1000 }")
+    else
+        sleep "$INTERVAL"
+    fi
 done"#;
         (serde_json::Value::Array(vec![]), json!([
             {
@@ -111,7 +142,9 @@ done"#;
                 "name": "app",
                 "image": "aether-nodejs:20-slim",
                 "workingDir": "/workspace",
-                "command": ["node","server.js"],
+                // Graceful reload: Node 20 builtin watcher auto restarts on file changes in /workspace
+                // Fallback: if --watch unsupported, it will exit; future enhancement could switch to nodemon image.
+                "command": ["node","--watch","server.js"],
                 "volumeMounts": [ {"name": "workspace", "mountPath": "/workspace" } ],
                 "env": envs,
             }
