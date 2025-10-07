@@ -4,7 +4,7 @@ use control_plane::{build_router, AppState};
 use sha2::{Sha256, Digest};
 
 fn manifest_digest(files: &[(&str,&str)]) -> String {
-    let mut v: Vec<(&str,&str)> = files.iter().cloned().collect();
+    let mut v: Vec<(&str,&str)> = files.to_vec();
     v.sort_by(|a,b| a.0.cmp(b.0));
     let mut h = Sha256::new();
     for (p,d) in v { h.update(p.as_bytes()); h.update(d.as_bytes()); }
