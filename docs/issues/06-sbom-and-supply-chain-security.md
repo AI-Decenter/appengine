@@ -11,13 +11,16 @@ Nâng nền tảng supply chain: chuẩn hóa SBOM theo CycloneDX, phục vụ p
 | Gắn SBOM URL vào artifact record | DONE | `upload_sbom` cập nhật cột sbom_url (/artifacts/{digest}/sbom) |
 | Endpoint `GET /artifacts/{digest}/sbom` | DONE | Trả file `<digest>.sbom.json` từ `AETHER_SBOM_DIR` (simple static read) |
 | Server verify chữ ký artifact (env gated) | DONE | `AETHER_REQUIRE_SIGNATURE=1` -> bắt buộc chữ ký & verify pubkey(s) trước deploy |
-| Provenance document emission | PARTIAL (v1+v2) | v1 basic + v2 (sbom_sha256, materials, dsse envelope) – still not full in-toto/SLSA |
+| Provenance document emission | PARTIAL (v1+v2) | v1 basic + v2 (sbom_sha256, materials, dsse envelope, provenance_emitted_total metric) – still not full in-toto/SLSA |
 | Dedicated signature failure metric | DONE (Issue 05) | `dev_hot_signature_fail_total` |
-| SBOM validation server-side | DONE (subset schema) | jsonschema subset validation + size limits + metrics |
+| SBOM validation server-side | DONE (subset + strict deploy check) | jsonschema subset/full + size limits + metrics + deploy-time validated flag |
 | Full CycloneDX schema validation (env gated) | DONE (AETHER_CYCLONEDX_FULL_SCHEMA) | Extended schema sections (components, dependencies) |
 | Provenance list/fetch endpoints | DONE | /provenance, /provenance/{digest}, /provenance/{digest}/attestation |
 | DSSE real signing (attestation key) | DONE | ed25519 dedicated key (AETHER_ATTESTATION_SK) canonical JSON |
 | Lockfile integrity ingestion | DONE (npm) | Parse package-lock.json integrity -> per-dep hashes |
+| Manifest upload + digest cross-check | DONE (Phase 3) | /artifacts/{digest}/manifest + manifest_digest ↔ SBOM x-manifest-digest enforcement |
+| Strict SBOM deploy enforcement | DONE (Phase 3) | Enforce sbom_validated & manifest_digest match when AETHER_ENFORCE_SBOM=1 |
+| Extended metrics (provenance_emitted_total, sbom_invalid_total) | DONE (Phase 3) | Added new counters |
 | Attach provenance link vào metadata | PARTIAL | Stored files + provenance_present DB flag (no listing endpoint yet) |
 
 ## Hiện tại (Current Implementation)
@@ -38,25 +41,24 @@ Nâng nền tảng supply chain: chuẩn hóa SBOM theo CycloneDX, phục vụ p
 ## Thiếu / Gaps
 * Advanced CycloneDX sections (services, compositions, vulnerabilities) vẫn chưa parse.
 * Per-file content hashing for dependencies (only aggregated + integrity) chưa đầy đủ reproducibility proof.
-* Chưa có manifest upload -> chưa integrity cross-check manifest_digest vs server recompute.
-* Không có API list provenance/attestation (file only).
-* DSSE chưa ký bằng khoá attestation chuyên biệt (reuse/placeholder).
+* Per-file content hashing for dependencies (only aggregated + integrity) chưa đầy đủ reproducibility proof.
+* Advanced CycloneDX sections (services, compositions, vulnerabilities) vẫn chưa parse.
+* Gzip / content negotiation cho SBOM & provenance chưa có.
+* Lockfile materials ingestion sâu (as materials list) chưa thực hiện.
+* Public key rotation metadata chưa.
 * Chưa nén (gzip) / content negotiation cho SBOM & provenance.
 * Lockfile materials ingestion chưa thực hiện.
 
 ## Next-Up / Roadmap (Phase 3)
-1. Manifest upload + integrity recomputation pipeline (cross-check manifest_digest & SBOM content).
-2. Per-file dependency hash listing or nested components for deeper provenance.
-3. Extended CycloneDX sections (services, compositions, vulnerabilities) opt-in parsing.
-4. In-toto/SLSA enrichment: builder.id, buildType, invocation/environment, completeness attestations.
-5. Enforce SBOM validity (not just presence) on `AETHER_ENFORCE_SBOM=1`.
-6. Extended metrics: provenance_emitted_total, attestation_signed_total, sbom_invalid_total (ratio via Prom recording rules).
-7. Backfill job for legacy artifacts (generate SBOM + provenance v2) + dry-run.
-8. Public key rotation & expiry metadata + rotation policy doc.
-9. Optional gzip + conditional negotiation for SBOM/provenance.
-10. Lockfile ingestion as materials (package-lock / yarn.lock) + hashing.
-11. Dedicated attestation key & ed25519 DSSE signing.
-12. Manifest integrity verification once manifest upload implemented.
+1. Per-file dependency hash listing or nested components for deeper provenance.
+2. Extended CycloneDX sections (services, compositions, vulnerabilities) opt-in parsing.
+3. In-toto/SLSA enrichment: builder.id, buildType, invocation/environment, completeness attestations.
+4. Backfill job for legacy artifacts (generate SBOM + provenance v2) + dry-run.
+5. Public key rotation & expiry metadata + rotation policy doc.
+6. Optional gzip + conditional negotiation cho SBOM/provenance.
+7. Lockfile materials as provenance materials entries.
+8. Ghi nhận tỷ lệ sbom_invalid_total qua PromQL recording rules.
+9. (Optional) Per-file reproducibility proofs (component hashes nested) beyond current aggregated approach.
 
 ## Phân Công Gợi Ý (Optional)
 | Task | Độ ưu tiên | Effort |
@@ -77,12 +79,16 @@ Nâng nền tảng supply chain: chuẩn hóa SBOM theo CycloneDX, phục vụ p
 - [x] SBOM upload & storage integration
 - [x] DB schema: cột `sbom_url`
 - [x] Server SBOM validation logic (subset schema + metrics)
-- [x] Policy `AETHER_ENFORCE_SBOM` (basic: requires presence only)
+- [x] Policy `AETHER_ENFORCE_SBOM` (basic presence)
+- [x] Strict deploy enforcement (validated + digest match)
 - [x] Metrics coverage (SBOM, signature, provenance gauges)
-- [ ] In-toto style provenance nâng cao (v2 partial: sbom hash, materials placeholder)
+- [ ] In-toto style provenance nâng cao (v2 partial: materials placeholder only)
 - [x] DSSE Attestation bundling (signed if AETHER_ATTESTATION_SK provided)
 - [x] Cache headers / ETag SBOM endpoint
 - [ ] Public key rotation metadata
+- [x] Manifest upload + digest cross-check
+- [x] provenance_emitted_total metric
+- [x] sbom_invalid_total metric
 - [x] Full CycloneDX extended schema (env toggle)
 - [x] Provenance fetch/list endpoints
 - [x] Lockfile integrity ingestion (npm)
