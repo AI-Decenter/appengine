@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use sha2::{Digest, Sha256};
 use base64::Engine;
 use ed25519_dalek::{SigningKey,Signer};
-use crate::telemetry::ATTESTATION_SIGNED_TOTAL;
+use crate::telemetry::{ATTESTATION_SIGNED_TOTAL, PROVENANCE_EMITTED_TOTAL};
 
 #[derive(Serialize)]
 struct ProvenanceV1<'a> {
@@ -79,6 +79,7 @@ pub fn write_provenance(app: &str, digest: &str, signature_present: bool) -> Res
     let v2_canon = canonical_json(&v2_value);
     let path_v2 = PathBuf::from(&dir).join(format!("{app}-{digest}.prov2.json"));
     fs::write(&path_v2, serde_json::to_vec_pretty(&v2_canon)?)?;
+    PROVENANCE_EMITTED_TOTAL.with_label_values(&[app]).inc();
     // DSSE signing with dedicated attestation key (AETHER_ATTESTATION_SK hex 32 bytes)
     let payload_bytes = serde_json::to_vec(&v2_canon)?;
     let payload_b64 = base64::engine::general_purpose::STANDARD.encode(&payload_bytes);

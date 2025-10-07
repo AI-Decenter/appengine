@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use tracing::info;
 use serde::Deserialize;
 use crate::models::Artifact;
-use crate::telemetry::REGISTRY;
+use crate::telemetry::{REGISTRY, SBOM_INVALID_TOTAL};
 use prometheus::{IntCounter, IntCounterVec};
 use sha2::{Sha256, Digest};
 
@@ -93,19 +93,22 @@ pub async fn upload_sbom(State(state): State<AppState>, Path(digest): Path<Strin
     SBOM_UPLOADS_TOTAL.inc();
     if digest.len()!=64 || !digest.chars().all(|c| c.is_ascii_hexdigit()) { SBOM_UPLOAD_STATUS_TOTAL.with_label_values(&["bad_digest"]).inc(); return Err(ApiError::bad_request("digest must be 64 hex")); }
     // Ensure artifact exists
-    let art = sqlx::query_as::<_, Artifact>("SELECT id, app_id, digest, size_bytes, signature, sbom_url, manifest_url, verified, storage_key, status, created_at, completed_at, idempotency_key, multipart_upload_id FROM artifacts WHERE digest=$1")
+    let art = sqlx::query_as::<_, Artifact>("SELECT id, app_id, digest, size_bytes, signature, sbom_url, manifest_url, verified, storage_key, status, created_at, completed_at, idempotency_key, multipart_upload_id, provenance_present, manifest_digest, sbom_manifest_digest, sbom_validated FROM artifacts WHERE digest=$1")
         .bind(&digest)
         .fetch_optional(&state.db).await.map_err(|e| ApiError::internal(format!("db: {e}")))?;
     let Some(_artifact) = art else { SBOM_UPLOAD_STATUS_TOTAL.with_label_values(&["not_found"]).inc(); return Err(ApiError::not_found("artifact not found")); };
     // Parse JSON
     let json: serde_json::Value = serde_json::from_slice(&body).map_err(|e| { SBOM_UPLOAD_STATUS_TOTAL.with_label_values(&["invalid_json"]).inc(); ApiError::bad_request(format!("invalid json: {e}")) })?;
     let is_cyclonedx = json.get("bomFormat").is_some();
+    let mut sbom_manifest_digest: Option<String> = None;
     if is_cyclonedx {
-        match validate_cyclonedx(&json) { Ok(_) => { SBOM_UPLOAD_STATUS_TOTAL.with_label_values(&["cyclonedx_valid"]).inc(); SBOM_VALIDATION_TOTAL.with_label_values(&["ok"]).inc(); }, Err(e) => { SBOM_UPLOAD_STATUS_TOTAL.with_label_values(&["cyclonedx_invalid"]).inc(); SBOM_VALIDATION_TOTAL.with_label_values(&["fail"]).inc(); return Err(ApiError::bad_request(format!("invalid CycloneDX: {e}"))); } }
+        match validate_cyclonedx(&json) { Ok(_) => { SBOM_UPLOAD_STATUS_TOTAL.with_label_values(&["cyclonedx_valid"]).inc(); SBOM_VALIDATION_TOTAL.with_label_values(&["ok"]).inc(); }, Err(e) => { SBOM_UPLOAD_STATUS_TOTAL.with_label_values(&["cyclonedx_invalid"]).inc(); SBOM_VALIDATION_TOTAL.with_label_values(&["fail"]).inc(); SBOM_INVALID_TOTAL.inc(); return Err(ApiError::bad_request(format!("invalid CycloneDX: {e}"))); } }
+        if let Some(md)=json.get("x-manifest-digest").and_then(|v| v.as_str()) { sbom_manifest_digest = Some(md.to_string()); }
     } else if json.get("schema").and_then(|v| v.as_str()) == Some("aether-sbom-v1") {
         SBOM_UPLOAD_STATUS_TOTAL.with_label_values(&["legacy_ok"]).inc();
     } else {
         SBOM_UPLOAD_STATUS_TOTAL.with_label_values(&["unsupported_format"]).inc();
+        SBOM_INVALID_TOTAL.inc();
         return Err(ApiError::bad_request("unsupported SBOM format (expect CycloneDX or aether-sbom-v1)"));
     }
     // Size guard
@@ -120,10 +123,52 @@ pub async fn upload_sbom(State(state): State<AppState>, Path(digest): Path<Strin
     if let Err(e) = tokio::fs::write(&path, &body).await { return Err(ApiError::internal(format!("write sbom: {e}"))); }
     // Update DB (best-effort)
     let url = format!("/artifacts/{digest}/sbom");
-    let _ = sqlx::query("UPDATE artifacts SET sbom_url=$1 WHERE digest=$2")
+    let _ = sqlx::query("UPDATE artifacts SET sbom_url=$1, sbom_validated=CASE WHEN $3 THEN TRUE ELSE sbom_validated END, sbom_manifest_digest=COALESCE($4,sbom_manifest_digest) WHERE digest=$2")
         .bind(&url)
         .bind(&digest)
+        .bind(is_cyclonedx)
+        .bind(&sbom_manifest_digest)
         .execute(&state.db).await;
+    if let Some(sm)=sbom_manifest_digest.as_ref() {
+        if let Ok(Some((manifest_digest,))) = sqlx::query_as::<_, (Option<String>,)>("SELECT manifest_digest FROM artifacts WHERE digest=$1").bind(&digest).fetch_optional(&state.db).await {
+            if let Some(md)=manifest_digest { if md != *sm { SBOM_INVALID_TOTAL.inc(); return Err(ApiError::bad_request("manifest digest mismatch (SBOM vs manifest)")); } }
+        }
+    }
     info!(digest=%digest, len=body.len(), cyclonedx=is_cyclonedx, "sbom_uploaded");
     Ok((StatusCode::CREATED, Json(serde_json::json!({"status":"ok","cyclonedx":is_cyclonedx,"url":url}))))
+}
+
+#[derive(Deserialize)] struct ManifestFile { path: String, sha256: String }
+#[derive(Deserialize)] struct ManifestUpload { files: Vec<ManifestFile> }
+
+pub async fn upload_manifest(State(state): State<AppState>, Path(digest): Path<String>, body: axum::body::Bytes) -> ApiResult<impl IntoResponse> {
+    if digest.len()!=64 || !digest.chars().all(|c| c.is_ascii_hexdigit()) { return Err(ApiError::bad_request("digest must be 64 hex")); }
+    let exists = sqlx::query_scalar::<_, i64>("SELECT 1::BIGINT FROM artifacts WHERE digest=$1")
+        .bind(&digest).fetch_optional(&state.db).await.map_err(|e| ApiError::internal(format!("db: {e}")))?.is_some();
+    if !exists { return Err(ApiError::not_found("artifact not found")); }
+    let parsed: ManifestUpload = serde_json::from_slice(&body).map_err(|e| ApiError::bad_request(format!("invalid manifest json: {e}")))?;
+    if parsed.files.is_empty() { return Err(ApiError::bad_request("manifest has no files")); }
+    let mut entries: Vec<&ManifestFile> = parsed.files.iter().collect(); entries.sort_by(|a,b| a.path.cmp(&b.path));
+    let mut h = Sha256::new(); for f in &entries { h.update(f.path.as_bytes()); h.update(f.sha256.as_bytes()); }
+    let manifest_digest = format!("{:x}", h.finalize());
+    let dir = std::env::var("AETHER_MANIFEST_DIR").unwrap_or_else(|_| std::env::var("AETHER_SBOM_DIR").unwrap_or_else(|_| "./".into()));
+    tokio::fs::create_dir_all(&dir).await.map_err(|e| ApiError::internal(format!("create manifest dir: {e}")))?;
+    let path = PathBuf::from(&dir).join(format!("{}.manifest.json", digest));
+    tokio::fs::write(&path, &body).await.map_err(|e| ApiError::internal(format!("write manifest: {e}")))?;
+    let url = format!("/artifacts/{digest}/manifest");
+    let _ = sqlx::query("UPDATE artifacts SET manifest_url=$1, manifest_digest=$2 WHERE digest=$3")
+        .bind(&url).bind(&manifest_digest).bind(&digest).execute(&state.db).await;
+    if let Ok(Some((sbom_md,))) = sqlx::query_as::<_, (Option<String>,)>("SELECT sbom_manifest_digest FROM artifacts WHERE digest=$1").bind(&digest).fetch_optional(&state.db).await {
+        if let Some(sm)=sbom_md { if sm != manifest_digest { return Err(ApiError::bad_request("manifest digest mismatch (manifest vs SBOM)")); } }
+    }
+    Ok((StatusCode::CREATED, Json(serde_json::json!({"status":"ok","manifest_digest":manifest_digest,"url":url}))))
+}
+
+pub async fn get_manifest(State(_state): State<AppState>, Path(digest): Path<String>) -> ApiResult<impl IntoResponse> {
+    if digest.len()!=64 || !digest.chars().all(|c| c.is_ascii_hexdigit()) { return Err(ApiError::bad_request("digest must be 64 hex")); }
+    let dir = std::env::var("AETHER_MANIFEST_DIR").unwrap_or_else(|_| std::env::var("AETHER_SBOM_DIR").unwrap_or_else(|_| "./".into()));
+    let path = PathBuf::from(&dir).join(format!("{}.manifest.json", digest));
+    if !path.exists() { return Err(ApiError::not_found("manifest not found")); }
+    let bytes = tokio::fs::read(&path).await.map_err(|e| ApiError::internal(format!("read manifest: {e}")))?;
+    Ok((StatusCode::OK, [("Content-Type","application/json")], bytes))
 }

@@ -78,6 +78,16 @@ pub static ATTESTATION_SIGNED_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     REGISTRY.register(Box::new(c.clone())).ok();
     c
 });
+pub static PROVENANCE_EMITTED_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    let c = IntCounterVec::new(opts!("provenance_emitted_total", "Provenance documents written"), &["app"]).unwrap();
+    REGISTRY.register(Box::new(c.clone())).ok();
+    c
+});
+pub static SBOM_INVALID_TOTAL: Lazy<prometheus::IntCounter> = Lazy::new(|| {
+    let c = prometheus::IntCounter::new("sbom_invalid_total", "Total invalid or mismatched SBOM uploads").unwrap();
+    REGISTRY.register(Box::new(c.clone())).ok();
+    c
+});
 
 // Coverage metrics gauges (updated periodically elsewhere)
 pub static ARTIFACTS_WITH_SBOM: Lazy<IntGauge> = Lazy::new(|| { let g = IntGauge::new("artifacts_with_sbom_total", "Artifacts having an SBOM").unwrap(); REGISTRY.register(Box::new(g.clone())).ok(); g });

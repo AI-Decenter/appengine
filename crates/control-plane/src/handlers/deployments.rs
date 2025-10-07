@@ -89,12 +89,13 @@ pub async fn create_deployment(State(state): State<AppState>, Json(req): Json<Cr
     // SBOM enforcement: if enabled and digest resolved, ensure sbom_url populated
     if std::env::var("AETHER_ENFORCE_SBOM").unwrap_or_default() == "1" {
         if let Some(d) = resolved_digest.as_deref() {
-            if let Ok(Some(row)) = sqlx::query_as::<_, (Option<String>,)>("SELECT sbom_url FROM artifacts WHERE digest=$1")
+            if let Ok(Some(row)) = sqlx::query_as::<_, (Option<String>, Option<bool>, Option<String>, Option<String>)>("SELECT sbom_url, sbom_validated, manifest_digest, sbom_manifest_digest FROM artifacts WHERE digest=$1")
                 .bind(d).fetch_optional(&state.db).await {
-                if row.0.is_none() { return Err(ApiError::bad_request("SBOM required for deployment (AETHER_ENFORCE_SBOM=1)")); }
-            } else {
-                return Err(ApiError::bad_request("artifact digest not found for SBOM enforcement"));
-            }
+                let (sbom_url, validated, manifest_digest, sbom_manifest_digest) = row;
+                if sbom_url.is_none() { return Err(ApiError::bad_request("SBOM required for deployment (AETHER_ENFORCE_SBOM=1)")); }
+                if validated != Some(true) { return Err(ApiError::bad_request("SBOM not validated")); }
+                if let (Some(md), Some(sm)) = (manifest_digest, sbom_manifest_digest) { if md != sm { return Err(ApiError::bad_request("manifest digest mismatch (cannot deploy)")); } }
+            } else { return Err(ApiError::bad_request("artifact digest not found for SBOM enforcement")); }
         }
     }
     let deployment: Deployment = services::deployments::create_deployment(&state.db, &req.app_name, &req.artifact_url, resolved_digest.as_deref(), req.signature.as_deref())
