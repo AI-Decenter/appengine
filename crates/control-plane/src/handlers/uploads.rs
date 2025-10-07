@@ -565,7 +565,7 @@ pub async fn head_artifact(State(state): State<AppState>, Path(digest): Path<Str
 #[utoipa::path(get, path="/artifacts/{digest}/meta", params(("digest"=String, description="Artifact digest")), responses((status=200, body=Artifact),(status=404)), tag="aether")]
 pub async fn artifact_meta(State(state): State<AppState>, Path(digest): Path<String>) -> impl IntoResponse {
     if digest.len()!=64 || !digest.chars().all(|c| c.is_ascii_hexdigit()) { return StatusCode::BAD_REQUEST.into_response(); }
-    match sqlx::query_as::<_, Artifact>("SELECT id, app_id, digest, size_bytes, signature, sbom_url, manifest_url, verified, storage_key, status, created_at, completed_at, idempotency_key, multipart_upload_id FROM artifacts WHERE digest=$1")
+    match sqlx::query_as::<_, Artifact>("SELECT id, app_id, digest, size_bytes, signature, sbom_url, manifest_url, verified, storage_key, status, created_at, completed_at, idempotency_key, multipart_upload_id, provenance_present FROM artifacts WHERE digest=$1")
         .bind(&digest)
         .fetch_optional(&state.db).await {
         Ok(Some(a)) => Json(a).into_response(),
@@ -605,7 +605,7 @@ async fn retention_gc_if_needed(conn: &mut PoolConnection<sqlx::Postgres>, app_i
     if retain == 0 { return Ok(()); }
     // Delete surplus (skip newest retain)
     let obsolete: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM artifacts WHERE app_id=$1 AND status='stored' ORDER BY created_at DESC OFFSET $2")
+        "SELECT id FROM artifacts WHERE app_id=$1 AND status='stored' ORDER BY created_at DESC, id DESC OFFSET $2")
         .bind(app)
         .bind(retain)
     .fetch_all(pg(conn)).await.unwrap_or_default();
@@ -760,7 +760,7 @@ pub async fn multipart_complete(State(state): State<AppState>, Json(req): Json<M
 )]
 pub async fn list_artifacts(State(state): State<AppState>) -> impl IntoResponse {
     // Select columns in the exact order of the Artifact struct definition.
-    let rows = sqlx::query_as::<_, Artifact>("SELECT id, app_id, digest, size_bytes, signature, sbom_url, manifest_url, verified, storage_key, status, created_at, completed_at, idempotency_key, multipart_upload_id FROM artifacts ORDER BY created_at DESC LIMIT 200")
+    let rows = sqlx::query_as::<_, Artifact>("SELECT id, app_id, digest, size_bytes, signature, sbom_url, manifest_url, verified, storage_key, status, created_at, completed_at, idempotency_key, multipart_upload_id, provenance_present FROM artifacts ORDER BY created_at DESC, id DESC LIMIT 200")
         .fetch_all(&state.db).await
         .unwrap_or_default();
     Json(rows)
