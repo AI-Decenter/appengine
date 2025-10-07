@@ -1,7 +1,9 @@
-use axum::{extract::{Path, State}, http::StatusCode, Json};
+use axum::{extract::{Path, State}, http::{StatusCode, HeaderMap, HeaderValue}, Json};
 use crate::{AppState, error::{ApiError, ApiResult}};
 use std::path::PathBuf;
 use serde::Serialize;
+use sha2::{Sha256, Digest};
+use std::io::Write;
 
 #[derive(Serialize)]
 pub struct ProvenanceEntry { pub digest: String, pub app: Option<String>, pub sbom: bool, pub attestation: bool }
@@ -17,7 +19,7 @@ pub async fn list_provenance(State(state): State<AppState>) -> ApiResult<Json<Ve
     Ok(Json(out))
 }
 
-pub async fn get_provenance(State(_state): State<AppState>, Path(digest): Path<String>) -> ApiResult<(StatusCode, Vec<u8>)> {
+pub async fn get_provenance(State(_state): State<AppState>, Path(digest): Path<String>, headers_in: HeaderMap) -> ApiResult<(StatusCode, HeaderMap, Vec<u8>)> {
     let dir = std::env::var("AETHER_PROVENANCE_DIR").unwrap_or_else(|_| "/tmp/provenance".into());
     // app name unknown -> search first match
     let path_glob = format!("{}/*-{}.prov2.json", dir, digest);
@@ -25,15 +27,35 @@ pub async fn get_provenance(State(_state): State<AppState>, Path(digest): Path<S
     if let Ok(entries) = glob::glob(&path_glob) { if let Some(e) = entries.flatten().next() { found = Some(e); } }
     let Some(p) = found else { return Err(ApiError::not_found("provenance not found")); };
     let bytes = std::fs::read(&p).map_err(|e| ApiError::internal(format!("read: {e}")))?;
-    Ok((StatusCode::OK, bytes))
+    let mut hasher = Sha256::new(); hasher.update(&bytes); let etag = format!("\"{:x}\"", hasher.finalize());
+    if let Some(if_none) = headers_in.get("if-none-match").and_then(|v| v.to_str().ok()) { if if_none == etag { return Ok((StatusCode::NOT_MODIFIED, HeaderMap::new(), Vec::new())); } }
+    let mut headers = HeaderMap::new();
+    headers.insert("Content-Type", HeaderValue::from_static("application/json"));
+    headers.insert("ETag", HeaderValue::from_str(&etag).unwrap_or(HeaderValue::from_static("invalid")));
+    let accept_enc = headers_in.get("accept-encoding").and_then(|v| v.to_str().ok()).unwrap_or("");
+    if accept_enc.contains("gzip") {
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        if enc.write_all(&bytes).is_ok() { if let Ok(comp)=enc.finish() { headers.insert("Content-Encoding", HeaderValue::from_static("gzip")); return Ok((StatusCode::OK, headers, comp)); } }
+    }
+    Ok((StatusCode::OK, headers, bytes))
 }
 
-pub async fn get_attestation(State(_state): State<AppState>, Path(digest): Path<String>) -> ApiResult<(StatusCode, Vec<u8>)> {
+pub async fn get_attestation(State(_state): State<AppState>, Path(digest): Path<String>, headers_in: HeaderMap) -> ApiResult<(StatusCode, HeaderMap, Vec<u8>)> {
     let dir = std::env::var("AETHER_PROVENANCE_DIR").unwrap_or_else(|_| "/tmp/provenance".into());
     let path_glob = format!("{}/*-{}.prov2.dsse.json", dir, digest);
     let mut found: Option<PathBuf> = None;
     if let Ok(entries) = glob::glob(&path_glob) { if let Some(e) = entries.flatten().next() { found = Some(e); } }
     let Some(p) = found else { return Err(ApiError::not_found("attestation not found")); };
     let bytes = std::fs::read(&p).map_err(|e| ApiError::internal(format!("read: {e}")))?;
-    Ok((StatusCode::OK, bytes))
+    let mut hasher = Sha256::new(); hasher.update(&bytes); let etag = format!("\"{:x}\"", hasher.finalize());
+    if let Some(if_none) = headers_in.get("if-none-match").and_then(|v| v.to_str().ok()) { if if_none == etag { return Ok((StatusCode::NOT_MODIFIED, HeaderMap::new(), Vec::new())); } }
+    let mut headers = HeaderMap::new();
+    headers.insert("Content-Type", HeaderValue::from_static("application/json"));
+    headers.insert("ETag", HeaderValue::from_str(&etag).unwrap_or(HeaderValue::from_static("invalid")));
+    let accept_enc = headers_in.get("accept-encoding").and_then(|v| v.to_str().ok()).unwrap_or("");
+    if accept_enc.contains("gzip") {
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        if enc.write_all(&bytes).is_ok() { if let Ok(comp)=enc.finish() { headers.insert("Content-Encoding", HeaderValue::from_static("gzip")); return Ok((StatusCode::OK, headers, comp)); } }
+    }
+    Ok((StatusCode::OK, headers, bytes))
 }

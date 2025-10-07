@@ -9,6 +9,7 @@ use crate::models::Artifact;
 use crate::telemetry::{REGISTRY, SBOM_INVALID_TOTAL};
 use prometheus::{IntCounter, IntCounterVec};
 use sha2::{Sha256, Digest};
+use std::io::Write;
 
 // Metrics for SBOM lifecycle
 static SBOM_UPLOADS_TOTAL: once_cell::sync::Lazy<IntCounter> = once_cell::sync::Lazy::new(|| {
@@ -82,6 +83,17 @@ pub async fn get_sbom(State(_state): State<AppState>, Path(digest): Path<String>
         headers.insert("Content-Type", HeaderValue::from_static("application/json"));
         headers.insert("ETag", HeaderValue::from_str(&etag_val).unwrap_or(HeaderValue::from_static("invalid")));
         headers.insert("Cache-Control", HeaderValue::from_static("public, immutable, max-age=31536000"));
+        // Gzip negotiation
+        let accept_enc = headers_in.get("accept-encoding").and_then(|v| v.to_str().ok()).unwrap_or("");
+        if accept_enc.contains("gzip") {
+            let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+            if encoder.write_all(&bytes).is_ok() {
+                if let Ok(comp) = encoder.finish() {
+                    headers.insert("Content-Encoding", HeaderValue::from_static("gzip"));
+                    return Ok((StatusCode::OK, headers, comp));
+                }
+            }
+        }
         return Ok((StatusCode::OK, headers, bytes));
     }
     Err(ApiError::not_found("sbom not found"))

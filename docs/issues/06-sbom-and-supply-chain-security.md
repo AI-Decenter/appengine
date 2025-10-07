@@ -43,22 +43,21 @@ Nâng nền tảng supply chain: chuẩn hóa SBOM theo CycloneDX, phục vụ p
 * Per-file content hashing for dependencies (only aggregated + integrity) chưa đầy đủ reproducibility proof.
 * Per-file content hashing for dependencies (only aggregated + integrity) chưa đầy đủ reproducibility proof.
 * Advanced CycloneDX sections (services, compositions, vulnerabilities) vẫn chưa parse.
-* Gzip / content negotiation cho SBOM & provenance chưa có.
+* Gzip / content negotiation cho SBOM & provenance (basic gzip + ETag) đã triển khai.
 * Lockfile materials ingestion sâu (as materials list) chưa thực hiện.
 * Public key rotation metadata chưa.
-* Chưa nén (gzip) / content negotiation cho SBOM & provenance.
+* Đã có gzip + ETag negotiation SBOM & provenance (cần mở rộng streaming/threshold sau này).
 * Lockfile materials ingestion chưa thực hiện.
 
 ## Next-Up / Roadmap (Phase 3)
 1. Per-file dependency hash listing or nested components for deeper provenance.
 2. Extended CycloneDX sections (services, compositions, vulnerabilities) opt-in parsing.
 3. In-toto/SLSA enrichment: builder.id, buildType, invocation/environment, completeness attestations.
-4. Backfill job for legacy artifacts (generate SBOM + provenance v2) + dry-run.
+4. Backfill job phase 2: enrich placeholder -> full materials + dry-run + idempotency.
 5. Public key rotation & expiry metadata + rotation policy doc.
-6. Optional gzip + conditional negotiation cho SBOM/provenance.
-7. Lockfile materials as provenance materials entries.
-8. Ghi nhận tỷ lệ sbom_invalid_total qua PromQL recording rules.
-9. (Optional) Per-file reproducibility proofs (component hashes nested) beyond current aggregated approach.
+6. Lockfile materials as provenance materials entries.
+7. Ghi nhận tỷ lệ sbom_invalid_total qua PromQL recording rules.
+8. (Optional) Per-file reproducibility proofs (component hashes nested) beyond current aggregated approach.
 
 ## Phân Công Gợi Ý (Optional)
 | Task | Độ ưu tiên | Effort |
@@ -83,6 +82,8 @@ Nâng nền tảng supply chain: chuẩn hóa SBOM theo CycloneDX, phục vụ p
 - [x] Strict deploy enforcement (validated + digest match)
 - [x] Metrics coverage (SBOM, signature, provenance gauges)
 - [ ] In-toto style provenance nâng cao (v2 partial: materials placeholder only)
+- [x] Backfill legacy artifacts (phase 1 minimal SBOM + provenance)
+- [x] Gzip + ETag negotiation SBOM & provenance
 - [x] DSSE Attestation bundling (signed if AETHER_ATTESTATION_SK provided)
 - [x] Cache headers / ETag SBOM endpoint
 - [ ] Public key rotation metadata
