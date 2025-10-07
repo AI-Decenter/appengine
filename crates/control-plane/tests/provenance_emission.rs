@@ -1,6 +1,6 @@
 use axum::{http::{Request, StatusCode}, body::Body};
 use tower::util::ServiceExt;
-use control_plane::{build_router, AppState};
+use control_plane::build_router;
 
 #[tokio::test]
 #[serial_test::serial]
