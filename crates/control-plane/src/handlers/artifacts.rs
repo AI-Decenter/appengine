@@ -141,9 +141,12 @@ pub async fn upload_sbom(State(state): State<AppState>, Path(digest): Path<Strin
         .bind(is_cyclonedx)
         .bind(&sbom_manifest_digest)
         .execute(&state.db).await;
-    if let Some(sm)=sbom_manifest_digest.as_ref() {
-        if let Ok(Some((manifest_digest,))) = sqlx::query_as::<_, (Option<String>,)>("SELECT manifest_digest FROM artifacts WHERE digest=$1").bind(&digest).fetch_optional(&state.db).await {
-            if let Some(md)=manifest_digest { if md != *sm { SBOM_INVALID_TOTAL.inc(); return Err(ApiError::bad_request("manifest digest mismatch (SBOM vs manifest)")); } }
+    if let Some(sm) = sbom_manifest_digest.as_ref() {
+        if let Ok(Some((Some(md),))) = sqlx::query_as::<_, (Option<String>,)>("SELECT manifest_digest FROM artifacts WHERE digest=$1")
+            .bind(&digest)
+            .fetch_optional(&state.db)
+            .await {
+            if md != *sm { SBOM_INVALID_TOTAL.inc(); return Err(ApiError::bad_request("manifest digest mismatch (SBOM vs manifest)")); }
         }
     }
     info!(digest=%digest, len=body.len(), cyclonedx=is_cyclonedx, "sbom_uploaded");
@@ -170,8 +173,11 @@ pub async fn upload_manifest(State(state): State<AppState>, Path(digest): Path<S
     let url = format!("/artifacts/{digest}/manifest");
     let _ = sqlx::query("UPDATE artifacts SET manifest_url=$1, manifest_digest=$2 WHERE digest=$3")
         .bind(&url).bind(&manifest_digest).bind(&digest).execute(&state.db).await;
-    if let Ok(Some((sbom_md,))) = sqlx::query_as::<_, (Option<String>,)>("SELECT sbom_manifest_digest FROM artifacts WHERE digest=$1").bind(&digest).fetch_optional(&state.db).await {
-        if let Some(sm)=sbom_md { if sm != manifest_digest { return Err(ApiError::bad_request("manifest digest mismatch (manifest vs SBOM)")); } }
+    if let Ok(Some((Some(sm),))) = sqlx::query_as::<_, (Option<String>,)>("SELECT sbom_manifest_digest FROM artifacts WHERE digest=$1")
+        .bind(&digest)
+        .fetch_optional(&state.db)
+        .await {
+        if sm != manifest_digest { return Err(ApiError::bad_request("manifest digest mismatch (manifest vs SBOM)")); }
     }
     Ok((StatusCode::CREATED, Json(serde_json::json!({"status":"ok","manifest_digest":manifest_digest,"url":url}))))
 }
