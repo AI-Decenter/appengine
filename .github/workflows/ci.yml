@@ -85,8 +85,8 @@ jobs:
     #  - Nightly schedule
     #  - Manual dispatch
     #  - Push to main
-    #  - Pull requests explicitly labeled with 'full-tests'
-    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && contains(toJson(github.event.pull_request.labels), 'full-tests')) }}
+    #  - Any pull_request (always run full suite for PRs)
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
