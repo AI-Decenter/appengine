@@ -131,7 +131,20 @@ pub fn write_provenance(app: &str, digest: &str, signature_present: bool) -> Res
     let mut key_specs: Vec<(String,String)> = Vec::new();
     if let Ok(main) = std::env::var("AETHER_ATTESTATION_SK") { key_specs.push((main, std::env::var("AETHER_ATTESTATION_KEY_ID").unwrap_or_else(|_| "attestation-default".into()))); }
     if let Ok(rot) = std::env::var("AETHER_ATTESTATION_SK_ROTATE2") { key_specs.push((rot, std::env::var("AETHER_ATTESTATION_KEY_ID_ROTATE2").unwrap_or_else(|_| "attestation-rotated".into()))); }
+    // Load keystore to determine retired keys (status!="active")
+    let mut retired: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let keystore_path = PathBuf::from(&dir).join("provenance_keys.json");
+    if keystore_path.exists() {
+        if let Ok(text) = fs::read_to_string(&keystore_path) {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+                if let Some(arr) = json.as_array() {
+                    for k in arr { if let (Some(id), Some(status)) = (k.get("key_id").and_then(|v| v.as_str()), k.get("status").and_then(|v| v.as_str())) { if status != "active" { retired.insert(id.to_string()); } } }
+                }
+            }
+        }
+    }
     for (hex_key, keyid) in key_specs.into_iter() {
+        if retired.contains(&keyid) { continue; }
         if let Ok(bytes) = hex::decode(hex_key.trim()) { if bytes.len()==32 { let sk = SigningKey::from_bytes(&bytes.clone().try_into().unwrap()); let sig = sk.sign(&payload_bytes); let sig_hex = hex::encode(sig.to_bytes()); signatures.push(DsseSignature { keyid: keyid.clone(), sig: sig_hex }); ATTESTATION_SIGNED_TOTAL.with_label_values(&[app]).inc(); } }
     }
     let env = DsseEnvelope { payloadType: "application/vnd.aether.provenance+json", payload: payload_b64, signatures };
