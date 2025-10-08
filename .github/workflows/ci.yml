@@ -81,7 +81,12 @@ jobs:
   full-tests:
     name: Full Tests (main / nightly / manual)
     needs: [fast-tests]
-    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    # Runs automatically on:
+    #  - Nightly schedule
+    #  - Manual dispatch
+    #  - Push to main
+    #  - Pull requests explicitly labeled with 'full-tests'
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && contains(toJson(github.event.pull_request.labels), 'full-tests')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
