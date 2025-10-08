@@ -50,10 +50,13 @@ jobs:
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          toolchain: 1.90.0
+          components: clippy,rustfmt
 
       - name: Install sccache
-        run: cargo install sccache --locked || true
+        uses: taiki-e/install-action@v2
+        with:
+          tool: sccache
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -99,10 +102,13 @@ jobs:
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          toolchain: 1.90.0
+          components: clippy,rustfmt
 
       - name: Install sccache
-        run: cargo install sccache --locked || true
+        uses: taiki-e/install-action@v2
+        with:
+          tool: sccache
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
