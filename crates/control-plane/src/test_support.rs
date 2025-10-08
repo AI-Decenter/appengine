@@ -35,7 +35,16 @@ CREATE TABLE IF NOT EXISTS public_keys (id BLOB PRIMARY KEY DEFAULT (lower(hex(r
         // To keep existing function signature (Pool<Postgres>) we will fallback to original Postgres path if code later needs Postgres.
         // For now we simply panic to highlight misuse; tests that call functions expecting Postgres should set AETHER_USE_SQLITE=0.
     }
-    let use_shared = std::env::var("AETHER_TEST_SHARED_POOL").ok().map(|v| v=="1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
+    // Decide shared pool policy:
+    // Priority order:
+    // 1. Explicit AETHER_TEST_SHARED_POOL env (true/false)
+    // 2. If running under CI (CI env set) -> enable shared to cut connection churn
+    // 3. If an external DATABASE_URL is provided -> enable shared (avoid repeated migrations)
+    // 4. Fallback: per-test pool
+    let use_shared = match std::env::var("AETHER_TEST_SHARED_POOL") {
+        Ok(v) => v=="1" || v.eq_ignore_ascii_case("true"),
+        Err(_) => std::env::var("CI").is_ok() || std::env::var(TEST_DB_URL_ENV).is_ok(),
+    };
     if use_shared {
         use tokio::sync::OnceCell;
         static POOL: OnceCell<Pool<Postgres>> = OnceCell::const_new();
@@ -45,7 +54,8 @@ CREATE TABLE IF NOT EXISTS public_keys (id BLOB PRIMARY KEY DEFAULT (lower(hex(r
 }
 
 async fn build_test_pool(shared: bool) -> Pool<Postgres> {
-    let max_conns: u32 = std::env::var("AETHER_TEST_MAX_CONNS").ok().and_then(|v| v.parse().ok()).unwrap_or(30);
+    // Lower default max connections to reduce contention / resource spikes in CI
+    let max_conns: u32 = std::env::var("AETHER_TEST_MAX_CONNS").ok().and_then(|v| v.parse().ok()).unwrap_or(10);
     // Strategy: if user explicitly provided DATABASE_URL -> use it (normalized). Else directly start container.
     let maybe_external = std::env::var(TEST_DB_URL_ENV).ok();
     let final_url = if let Some(raw) = maybe_external {
@@ -72,7 +82,15 @@ async fn build_test_pool(shared: bool) -> Pool<Postgres> {
     } else {
         eprintln!("Using per-test pool (url={})", sanitize_url(&final_url));
     }
-    sqlx::migrate!().run(&pool).await.expect("migrations");
+    if shared {
+        use tokio::sync::OnceCell;
+        static MIGRATIONS_APPLIED: OnceCell<()> = OnceCell::const_new();
+        MIGRATIONS_APPLIED.get_or_init(|| async {
+            sqlx::migrate!().run(&pool).await.expect("migrations");
+        }).await;
+    } else {
+        sqlx::migrate!().run(&pool).await.expect("migrations");
+    }
     pool
 }
 /// Normalize a postgres connection URL by injecting a password from POSTGRES_PASSWORD
@@ -111,10 +129,11 @@ pub async fn test_pool() -> Pool<Postgres> { shared_pool().await }
 /// Produce a fresh `AppState` for a test, cleaning mutable tables first.
 pub async fn test_state() -> AppState {
     let pool = shared_pool().await;
-    let _ = sqlx::query("DELETE FROM deployments").execute(&pool).await;
-    let _ = sqlx::query("DELETE FROM artifacts").execute(&pool).await;
-    let _ = sqlx::query("DELETE FROM public_keys").execute(&pool).await;
-    let _ = sqlx::query("DELETE FROM applications").execute(&pool).await;
+    // Faster cleanup: single TRUNCATE instead of multiple DELETEs (Postgres only)
+    // Safe because tests don't depend on persisted sequences and we restart identities.
+    let _ = sqlx::query("TRUNCATE TABLE deployments, artifacts, public_keys, applications RESTART IDENTITY CASCADE").execute(&pool).await;
+    // Warm-up acquire to pre-initialize connections (reduces first-query flake on readiness)
+    if let Err(e) = pool.acquire().await { eprintln!("[test_state] warm-up acquire failed: {e}"); }
     AppState { db: pool }
 }
 

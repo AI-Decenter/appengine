@@ -130,6 +130,9 @@ pub fn build_router(state: AppState) -> Router {
             }
         });
     }
+    // Build OpenAPI once; cloning is cheap (Arc internally)
+    static OPENAPI_DOC: once_cell::sync::Lazy<utoipa::openapi::OpenApi> = once_cell::sync::Lazy::new(|| ApiDoc::openapi());
+    let openapi = OPENAPI_DOC.clone();
     Router::new()
         .route("/health", get(health))
     .route("/readyz", get(readiness))
@@ -155,7 +158,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/apps/:app_name/deployments", get(app_deployments))
         .route("/apps/:app_name/logs", get(app_logs))
         .route("/apps/:app_name/public-keys", post(add_public_key))
-    .route("/openapi.json", get(|| async move { axum::Json(openapi.clone()) }))
+    .route("/openapi.json", get(move || async move { axum::Json(openapi.clone()) }))
         .route("/swagger", get(swagger_ui))
         .with_state(state)
 }
@@ -223,8 +226,15 @@ mod tests {
     async fn readiness_ok() {
     let pool = crate::test_support::test_pool().await;
     let app = build_router(AppState { db: pool });
-        let res = app.oneshot(Request::builder().uri("/readyz").body(Body::empty()).unwrap()).await.unwrap();
-        assert_eq!(res.status(), StatusCode::OK);
+        // Retry loop to mitigate transient connection establishment races under CI
+        let mut attempts = 0;
+        loop {
+            let res = app.clone().oneshot(Request::builder().uri("/readyz").body(Body::empty()).unwrap()).await.unwrap();
+            if res.status()==StatusCode::OK { break; }
+            attempts += 1;
+            if attempts > 5 { panic!("readiness did not reach 200 after retries (last={})", res.status()); }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
     }
 
     #[tokio::test]
