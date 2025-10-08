@@ -70,14 +70,6 @@ window.onload = () => { SwaggerUIBundle({ url: '/openapi.json', dom_id: '#swagge
 }
 
 pub fn build_router(state: AppState) -> Router {
-    let mut openapi = ApiDoc::openapi();
-    // Inject security scheme manually (workaround for macro limitations)
-    if let Ok(mut value) = serde_json::to_value(&openapi) {
-        use serde_json::json;
-        value["components"]["securitySchemes"]["bearer_auth"] = json!({"type":"http","scheme":"bearer"});
-        value["security"] = json!([{"bearer_auth": []}]);
-        if let Ok(spec) = serde_json::from_value(value.clone()) { openapi = spec; }
-    }
     // Background tasks (can be disabled in tests via AETHER_DISABLE_BACKGROUND=1)
     if std::env::var("AETHER_DISABLE_BACKGROUND").ok().as_deref() != Some("1") {
         // Initialize artifacts_total gauge asynchronously
@@ -130,8 +122,17 @@ pub fn build_router(state: AppState) -> Router {
             }
         });
     }
-    // Build OpenAPI once; cloning is cheap (Arc internally)
-    static OPENAPI_DOC: once_cell::sync::Lazy<utoipa::openapi::OpenApi> = once_cell::sync::Lazy::new(|| ApiDoc::openapi());
+    // Build OpenAPI once with injected security scheme
+    static OPENAPI_DOC: once_cell::sync::Lazy<utoipa::openapi::OpenApi> = once_cell::sync::Lazy::new(|| {
+        let base = ApiDoc::openapi();
+        if let Ok(mut value) = serde_json::to_value(&base) {
+            use serde_json::json;
+            value["components"]["securitySchemes"]["bearer_auth"] = json!({"type":"http","scheme":"bearer"});
+            value["security"] = json!([{"bearer_auth": []}]);
+            if let Ok(spec) = serde_json::from_value(value) { return spec; }
+        }
+        base
+    });
     let openapi = OPENAPI_DOC.clone();
     Router::new()
         .route("/health", get(health))
