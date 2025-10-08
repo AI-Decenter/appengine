@@ -134,6 +134,34 @@ pub fn build_router(state: AppState) -> Router {
         base
     });
     let openapi = OPENAPI_DOC.clone();
+    // Middleware: add X-Trace-Id propagation & request id generation
+    use axum::{extract::Request, middleware::Next};
+    use axum::http::HeaderValue;
+    async fn trace_layer(mut req: Request, next: Next) -> Result<axum::response::Response, axum::response::Response> {
+        let headers = req.headers();
+        let trace_id = headers.get("X-Trace-Id").and_then(|v| v.to_str().ok()).map(|s| s.to_string()).unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let request_id = headers.get("X-Request-Id").and_then(|v| v.to_str().ok()).map(|s| s.to_string()).unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        // Store in extensions
+        req.extensions_mut().insert(trace_id.clone()); // store trace id as String
+        req.extensions_mut().insert(request_id.clone());
+        let method = req.method().clone();
+        let path_raw = req.uri().path().to_string();
+        let norm_path = crate::telemetry::normalize_path(&path_raw);
+        let start = std::time::Instant::now();
+        let span = tracing::info_span!("http.req", %method, path=%norm_path, raw_path=%path_raw, %trace_id, %request_id);
+        let _enter = span.enter();
+        let mut resp = next.run(req).await;
+        let status = resp.status().as_u16();
+        let outcome = if (200..400).contains(&status) { "success" } else { "error" };
+        crate::telemetry::HTTP_REQUESTS.with_label_values(&[method.as_str(), &norm_path, &status.to_string(), outcome]).inc();
+        crate::telemetry::HTTP_REQUEST_DURATION.with_label_values(&[method.as_str(), &norm_path]).observe(start.elapsed().as_secs_f64());
+        // Propagate request id headers
+        if let Ok(h) = HeaderValue::from_str(&trace_id) { resp.headers_mut().insert("X-Trace-Id", h); }
+        if let Ok(h) = HeaderValue::from_str(&request_id) { resp.headers_mut().insert("X-Request-Id", h); }
+        tracing::info!(status, took_ms=%start.elapsed().as_millis(), outcome, "request.complete");
+        Ok(resp)
+    }
+    let trace_layer_mw = axum::middleware::from_fn(trace_layer);
     Router::new()
         .route("/health", get(health))
     .route("/readyz", get(readiness))
@@ -162,7 +190,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/apps/:app_name/public-keys", post(add_public_key))
     .route("/openapi.json", get(move || async move { axum::Json(openapi.clone()) }))
         .route("/swagger", get(swagger_ui))
-        .with_state(state)
+    .layer(trace_layer_mw)
+    .with_state(state)
 }
 
 #[cfg(test)]

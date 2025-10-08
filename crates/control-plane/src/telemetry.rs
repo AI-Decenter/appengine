@@ -43,6 +43,16 @@ pub static DB_POOL_IN_USE: Lazy<IntGauge> = Lazy::new(|| {
     REGISTRY.register(Box::new(g.clone())).ok();
     g
 });
+pub static RUNNING_DEPLOYMENTS: Lazy<IntGauge> = Lazy::new(|| {
+    let g = IntGauge::new("deployments_running_total", "Current number of running deployments").unwrap();
+    REGISTRY.register(Box::new(g.clone())).ok();
+    g
+});
+pub static ARTIFACT_VERIFY_FAILURE_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    let c = IntCounterVec::new(opts!("artifact_verify_failure_total", "Artifact / signature verification failures"), &["app","reason"]).unwrap();
+    REGISTRY.register(Box::new(c.clone())).ok();
+    c
+});
 
 // Dev hot mode metrics (Issue 05 follow-ups)
 // Build metadata label (commit sha) if provided at build time via env! macro fallback to "unknown"

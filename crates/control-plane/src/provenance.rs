@@ -34,7 +34,7 @@ struct ProvenanceV2<'a> {
     sbom_url: Option<String>,
     materials: Vec<MaterialRef>,
     #[serde(skip_serializing_if="Option::is_none")] builder: Option<Builder>,
-    #[serde(skip_serializing_if="Option::is_none")] buildType: Option<String>,
+    #[serde(skip_serializing_if="Option::is_none", rename="buildType")] build_type: Option<String>,
     #[serde(skip_serializing_if="Option::is_none")] invocation: Option<Invocation>,
     #[serde(skip_serializing_if="Option::is_none")] completeness: Option<Completeness>,
     #[serde(skip_serializing_if="Option::is_none")] metadata: Option<BuildMetadata>,
@@ -49,7 +49,11 @@ struct Invocation { environment: InvocationEnv, #[serde(default)] parameters: se
 #[derive(Serialize, Deserialize, Clone)]
 struct Completeness { parameters: bool, environment: bool, materials: bool }
 #[derive(Serialize, Deserialize, Clone)]
-struct BuildMetadata { buildStartedOn: String, buildFinishedOn: String, reproducible: bool }
+struct BuildMetadata { 
+    #[serde(rename="buildStartedOn")] build_started_on: String, 
+    #[serde(rename="buildFinishedOn")] build_finished_on: String, 
+    reproducible: bool 
+}
 
 #[derive(Serialize)]
 struct DsseSignature { keyid: String, sig: String }
@@ -115,8 +119,8 @@ pub fn write_provenance(app: &str, digest: &str, signature_present: bool) -> Res
     let finished = SystemTime::now();
     let started_rfc3339 = chrono::DateTime::<chrono::Utc>::from(started).to_rfc3339();
     let finished_rfc3339 = chrono::DateTime::<chrono::Utc>::from(finished).to_rfc3339();
-    let metadata = BuildMetadata { buildStartedOn: started_rfc3339, buildFinishedOn: finished_rfc3339, reproducible: false };
-    let v2_raw = ProvenanceV2 { schema: "aether.provenance.v2", app, artifact_digest: digest, signature_present, commit: commit.clone(), timestamp: ts.clone(), sbom_sha256: sbom_hash.clone(), sbom_url: if sbom_path.exists() { Some(format!("/artifacts/{digest}/sbom")) } else { None }, materials, builder: Some(Builder { id: builder_id }), buildType: Some(build_type), invocation: Some(invocation), completeness: Some(completeness), metadata: Some(metadata) };
+    let metadata = BuildMetadata { build_started_on: started_rfc3339, build_finished_on: finished_rfc3339, reproducible: false };
+    let v2_raw = ProvenanceV2 { schema: "aether.provenance.v2", app, artifact_digest: digest, signature_present, commit: commit.clone(), timestamp: ts.clone(), sbom_sha256: sbom_hash.clone(), sbom_url: if sbom_path.exists() { Some(format!("/artifacts/{digest}/sbom")) } else { None }, materials, builder: Some(Builder { id: builder_id }), build_type: Some(build_type), invocation: Some(invocation), completeness: Some(completeness), metadata: Some(metadata) };
     // Canonicalize JSON (sorted keys) before signing
     let v2_value = serde_json::to_value(&v2_raw)?;
     let v2_canon = canonical_json(&v2_value);

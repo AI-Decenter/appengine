@@ -62,6 +62,8 @@ pub async fn handle(opts: DeployOptions) -> Result<()> {
     }
 
     let mut ignore_patterns = load_ignore_patterns(root);
+    // Generate per-deploy trace id for propagation to control-plane
+    let deploy_trace_id = uuid::Uuid::new_v4().to_string();
     append_gitignore_patterns(root, &mut ignore_patterns);
     let (paths, digest, manifest) = collect_files_hash_and_manifest(root, &ignore_patterns)?;
 
@@ -99,7 +101,7 @@ pub async fn handle(opts: DeployOptions) -> Result<()> {
 
     if !no_upload {
         if let Ok(base) = std::env::var("AETHER_API_BASE") {
-            let upload_res = if use_legacy_upload { legacy_upload(&artifact_name, root, &base, &digest, sig_path.exists().then(|| sig_path.clone()), dev_hot).await } else { two_phase_upload(&artifact_name, root, &base, &digest, sig_path.exists().then(|| sig_path.clone()), dev_hot).await };
+            let upload_res = if use_legacy_upload { legacy_upload(&artifact_name, root, &base, &digest, sig_path.exists().then(|| sig_path.clone()), dev_hot, &deploy_trace_id).await } else { two_phase_upload(&artifact_name, root, &base, &digest, sig_path.exists().then(|| sig_path.clone()), dev_hot, &deploy_trace_id).await };
             match upload_res {
                 Ok(url)=> info!(event="deploy.upload", mode= if use_legacy_upload {"legacy"} else {"two_phase"}, base=%base, artifact=%artifact_name.display(), status="ok", returned_url=%url),
                 Err(e)=> { return Err(e); }
@@ -403,8 +405,8 @@ fn generate_sbom(root:&Path, artifact:&Path, manifest:&Manifest, cyclonedx: bool
     let services = if advanced { Some(vec![serde_json::json!({"bomRef":"service:app","name":"app-service","dependsOn": components.iter().filter(|c| c.ctype=="library").map(|c| c.bom_ref.clone()).collect::<Vec<_>>()})]) } else { None };
     let compositions = if advanced { Some(vec![serde_json::json!({"aggregate":"complete"})]) } else { None };
     let vulnerabilities = if advanced { if let Ok(vf) = std::env::var("AETHER_CYCLONEDX_VULN_FILE") { if let Ok(raw) = fs::read_to_string(&vf) { if let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) { Some(json.as_array().cloned().unwrap_or_default()) } else { None } } else { None } } else { None } } else { None };
-    let vuln_array = vulnerabilities.map(|arr| arr.into_iter().map(|v| v).collect());
-    let doc = Cyclone { bom_format: "CycloneDX", spec_version: "1.5", serial_number: serial, version: 1, metadata: Metadata { component: MetadataComponent { ctype: "application", name: app_name, version: version.clone(), bom_ref: app_bom_ref_val } }, components, dependencies, services, compositions, vulnerabilities: vuln_array, manifest_digest: &manifest_digest, total_files: manifest.total_files, total_size: manifest.total_size, files_truncated: if files_truncated { Some(true) } else { None } };
+    // vulnerabilities is already Option<Vec<_>>; no transformation needed
+    let doc = Cyclone { bom_format: "CycloneDX", spec_version: "1.5", serial_number: serial, version: 1, metadata: Metadata { component: MetadataComponent { ctype: "application", name: app_name, version: version.clone(), bom_ref: app_bom_ref_val } }, components, dependencies, services, compositions, vulnerabilities, manifest_digest: &manifest_digest, total_files: manifest.total_files, total_size: manifest.total_size, files_truncated: if files_truncated { Some(true) } else { None } };
         fs::write(&path, serde_json::to_vec_pretty(&doc)?)?;
         info!(event="deploy.sbom", format="cyclonedx", enriched=true, path=%path.display(), files=manifest.total_files);
     } else {
@@ -435,7 +437,7 @@ fn maybe_sign(artifact:&Path, digest:&str) -> Result<()> {
     Ok(())
 }
 
-async fn legacy_upload(artifact:&Path, root:&Path, base:&str, digest:&str, sig: Option<PathBuf>, dev_hot: bool) -> Result<String> {
+async fn legacy_upload(artifact:&Path, root:&Path, base:&str, digest:&str, sig: Option<PathBuf>, dev_hot: bool, trace_id: &str) -> Result<String> {
     let pkg = parse_package_json(root);
     let app_name = pkg.as_ref().and_then(|p| p.name.clone()).unwrap_or_else(|| "default-app".into());
     let client = reqwest::Client::new();
@@ -453,7 +455,7 @@ async fn legacy_upload(artifact:&Path, root:&Path, base:&str, digest:&str, sig: 
     };
     let form = reqwest::multipart::Form::new().text("app_name", app_name.clone()).part("artifact", part);
     let url = format!("{}/artifacts", base.trim_end_matches('/'));
-    let mut req = client.post(&url).multipart(form).header("X-Aether-Artifact-Digest", digest);
+    let mut req = client.post(&url).multipart(form).header("X-Aether-Artifact-Digest", digest).header("X-Trace-Id", trace_id);
     if let Some(sig_path) = sig {
         if let Ok(content) = fs::read_to_string(&sig_path) { req = req.header("X-Aether-Signature", content.trim()); }
     }
@@ -463,13 +465,13 @@ async fn legacy_upload(artifact:&Path, root:&Path, base:&str, digest:&str, sig: 
     let artifact_url = v.get("artifact_url").and_then(|x| x.as_str()).unwrap_or("").to_string();
     let dep_body = serde_json::json!({"app_name": app_name, "artifact_url": artifact_url, "dev_hot": dev_hot});
     let dep_url = format!("{}/deployments", base.trim_end_matches('/'));
-    let _ = client.post(&dep_url).json(&dep_body).send().await; // ignore error
+    let _ = client.post(&dep_url).json(&dep_body).header("X-Trace-Id", trace_id).send().await; // ignore error
     Ok(artifact_url)
 }
 
 // real_upload removed: migration complete; use two_phase_upload unless --legacy-upload provided.
 
-async fn two_phase_upload(artifact:&Path, root:&Path, base:&str, digest:&str, sig: Option<PathBuf>, dev_hot: bool) -> Result<String> {
+async fn two_phase_upload(artifact:&Path, root:&Path, base:&str, digest:&str, sig: Option<PathBuf>, dev_hot: bool, trace_id: &str) -> Result<String> {
     let pkg = parse_package_json(root);
     let app_name = pkg.as_ref().and_then(|p| p.name.clone()).unwrap_or_else(|| "default-app".into());
     let client = reqwest::Client::new();
@@ -479,9 +481,9 @@ async fn two_phase_upload(artifact:&Path, root:&Path, base:&str, digest:&str, si
     let meta = fs::metadata(artifact)?; let len = meta.len();
     let threshold = std::env::var("AETHER_MULTIPART_THRESHOLD_BYTES").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(u64::MAX);
     if len >= threshold && threshold>0 {
-    return multipart_upload(artifact, root, base, digest, sig, dev_hot).await;
+    return multipart_upload(artifact, root, base, digest, sig, dev_hot, trace_id).await;
     }
-    let presign_resp = client.post(&presign_url).json(&presign_body).send().await.map_err(|e| CliError::with_source(CliErrorKind::Runtime("presign request failed".into()), e))?;
+    let presign_resp = client.post(&presign_url).json(&presign_body).header("X-Trace-Id", trace_id).send().await.map_err(|e| CliError::with_source(CliErrorKind::Runtime("presign request failed".into()), e))?;
     if !presign_resp.status().is_success() { return Err(CliError::new(CliErrorKind::Runtime(format!("presign status {}", presign_resp.status()))).into()); }
     let presign_json: serde_json::Value = presign_resp.json().await.map_err(|e| CliError::with_source(CliErrorKind::Runtime("invalid presign response".into()), e))?;
     let method = presign_json.get("method").and_then(|m| m.as_str()).unwrap_or("NONE");
@@ -514,7 +516,7 @@ async fn two_phase_upload(artifact:&Path, root:&Path, base:&str, digest:&str, si
             };
             put_req = put_req.body(reqwest::Body::wrap_stream(stream));
         }
-        let put_resp = put_req.send().await.map_err(|e| CliError::with_source(CliErrorKind::Runtime("PUT upload failed".into()), e))?;
+    let put_resp = put_req.header("X-Trace-Id", trace_id).send().await.map_err(|e| CliError::with_source(CliErrorKind::Runtime("PUT upload failed".into()), e))?;
         if !put_resp.status().is_success() { return Err(CliError::new(CliErrorKind::Runtime(format!("PUT status {}", put_resp.status()))).into()); }
         let put_duration = start_put.elapsed().as_secs_f64();
         // Complete step
@@ -523,7 +525,7 @@ async fn two_phase_upload(artifact:&Path, root:&Path, base:&str, digest:&str, si
         let complete_url = format!("{}/artifacts/complete", base.trim_end_matches('/'));
         let idempotency_key = format!("idem-{}", digest);
         let complete_body = serde_json::json!({"app_name": app_name, "digest": digest, "size_bytes": size_bytes, "signature": signature_hex, "idempotency_key": idempotency_key});
-        let comp_resp = client.post(&complete_url).header("X-Aether-Upload-Duration", format!("{:.6}", put_duration)).json(&complete_body).send().await.map_err(|e| CliError::with_source(CliErrorKind::Runtime("complete request failed".into()), e))?;
+    let comp_resp = client.post(&complete_url).header("X-Aether-Upload-Duration", format!("{:.6}", put_duration)).header("X-Trace-Id", trace_id).json(&complete_body).send().await.map_err(|e| CliError::with_source(CliErrorKind::Runtime("complete request failed".into()), e))?;
         if !comp_resp.status().is_success() { return Err(CliError::new(CliErrorKind::Runtime(format!("complete status {}", comp_resp.status()))).into()); }
         // Attempt SBOM upload (best-effort) if file exists
     if let Some(sbom_path) = artifact.with_file_name(format!("{}.sbom.json", artifact.file_name().and_then(|s| s.to_str()).unwrap_or("artifact"))).to_str().map(PathBuf::from) {
@@ -531,34 +533,34 @@ async fn two_phase_upload(artifact:&Path, root:&Path, base:&str, digest:&str, si
                 let sbom_url = format!("{}/artifacts/{}/sbom", base.trim_end_matches('/'), digest);
                 if let Ok(content) = tokio::fs::read(&sbom_path).await {
                     let ct = if std::env::var("AETHER_SBOM_CYCLONEDX").ok().as_deref()==Some("1") { "application/vnd.cyclonedx+json" } else { "application/json" };
-                    let _ = client.post(&sbom_url).header("Content-Type", ct).body(content).send().await; // ignore errors
+                    let _ = client.post(&sbom_url).header("Content-Type", ct).header("X-Trace-Id", trace_id).body(content).send().await; // ignore errors
                 }
             }
         }
         // Optionally create deployment referencing storage key
     let dep_body = serde_json::json!({"app_name": app_name, "artifact_url": storage_key, "dev_hot": dev_hot});
         let dep_url = format!("{}/deployments", base.trim_end_matches('/'));
-        let _ = client.post(&dep_url).json(&dep_body).send().await; // ignore error
+        let _ = client.post(&dep_url).json(&dep_body).header("X-Trace-Id", trace_id).send().await; // ignore error
         return Ok(storage_key);
     }
     // Already stored (method NONE) -> create deployment pointing to storage_key
     if method == "NONE" {
     let dep_body = serde_json::json!({"app_name": app_name, "artifact_url": storage_key, "dev_hot": dev_hot});
         let dep_url = format!("{}/deployments", base.trim_end_matches('/'));
-        let _ = client.post(&dep_url).json(&dep_body).send().await; // ignore error
+        let _ = client.post(&dep_url).json(&dep_body).header("X-Trace-Id", trace_id).send().await; // ignore error
         return Ok(storage_key);
     }
     Err(CliError::new(CliErrorKind::Runtime("unsupported presign method".into())).into())
 }
 
-async fn multipart_upload(artifact:&Path, root:&Path, base:&str, digest:&str, sig: Option<PathBuf>, dev_hot: bool) -> Result<String> {
+async fn multipart_upload(artifact:&Path, root:&Path, base:&str, digest:&str, sig: Option<PathBuf>, dev_hot: bool, trace_id: &str) -> Result<String> {
     let client = reqwest::Client::new();
     let pkg = parse_package_json(root);
     let app_name = pkg.as_ref().and_then(|p| p.name.clone()).unwrap_or_else(|| "default-app".into());
     // init
     let init_url = format!("{}/artifacts/multipart/init", base.trim_end_matches('/'));
     let init_body = serde_json::json!({"app_name": app_name, "digest": digest});
-    let init_resp = client.post(&init_url).json(&init_body).send().await.map_err(|e| CliError::with_source(CliErrorKind::Runtime("multipart init failed".into()), e))?;
+    let init_resp = client.post(&init_url).json(&init_body).header("X-Trace-Id", trace_id).send().await.map_err(|e| CliError::with_source(CliErrorKind::Runtime("multipart init failed".into()), e))?;
     if !init_resp.status().is_success() { return Err(CliError::new(CliErrorKind::Runtime(format!("multipart init status {}", init_resp.status()))).into()); }
     let init_json: serde_json::Value = init_resp.json().await.map_err(|e| CliError::with_source(CliErrorKind::Runtime("invalid init response".into()), e))?;
     let upload_id = init_json.get("upload_id").and_then(|v| v.as_str()).ok_or_else(|| CliError::new(CliErrorKind::Runtime("missing upload_id".into())))?.to_string();
@@ -580,7 +582,7 @@ async fn multipart_upload(artifact:&Path, root:&Path, base:&str, digest:&str, si
         if read==0 { break; }
         let presign_part_url = format!("{}/artifacts/multipart/presign-part", base.trim_end_matches('/'));
         let presign_part_body = serde_json::json!({"digest": digest, "upload_id": upload_id, "part_number": part_number});
-        let part_resp = client.post(&presign_part_url).json(&presign_part_body).send().await.map_err(|e| CliError::with_source(CliErrorKind::Runtime("presign part failed".into()), e))?;
+    let part_resp = client.post(&presign_part_url).json(&presign_part_body).header("X-Trace-Id", trace_id).send().await.map_err(|e| CliError::with_source(CliErrorKind::Runtime("presign part failed".into()), e))?;
         if !part_resp.status().is_success() { return Err(CliError::new(CliErrorKind::Runtime(format!("presign part status {}", part_resp.status()))).into()); }
         let part_json: serde_json::Value = part_resp.json().await.map_err(|e| CliError::with_source(CliErrorKind::Runtime("invalid part response".into()), e))?;
         let url = part_json.get("url").and_then(|v| v.as_str()).ok_or_else(|| CliError::new(CliErrorKind::Runtime("missing part url".into())))?;
@@ -588,7 +590,7 @@ async fn multipart_upload(artifact:&Path, root:&Path, base:&str, digest:&str, si
         if let Some(hdrs) = part_json.get("headers").and_then(|h| h.as_object()) { for (k,v) in hdrs.iter() { if let Some(val)=v.as_str() { put_req = put_req.header(k, val); } } }
         let body_slice = &buf[..read];
         put_req = put_req.body(body_slice.to_vec());
-        let resp = put_req.send().await.map_err(|e| CliError::with_source(CliErrorKind::Runtime("part upload failed".into()), e))?;
+    let resp = put_req.header("X-Trace-Id", trace_id).send().await.map_err(|e| CliError::with_source(CliErrorKind::Runtime("part upload failed".into()), e))?;
         if !resp.status().is_success() { return Err(CliError::new(CliErrorKind::Runtime(format!("part upload status {}", resp.status()))).into()); }
         let etag = resp.headers().get("ETag").and_then(|v| v.to_str().ok()).unwrap_or("").trim_matches('"').to_string();
         parts.push((part_number, etag));
@@ -603,12 +605,12 @@ async fn multipart_upload(artifact:&Path, root:&Path, base:&str, digest:&str, si
     let idempotency_key = format!("idem-{}", digest);
     let parts_json: Vec<serde_json::Value> = parts.iter().map(|(n,e)| serde_json::json!({"part_number": n, "etag": e})).collect();
     let complete_body = serde_json::json!({"app_name": app_name, "digest": digest, "upload_id": upload_id, "size_bytes": fs::metadata(artifact).map(|m| m.len()).unwrap_or(0) as i64, "parts": parts_json, "signature": signature_hex, "idempotency_key": idempotency_key});
-    let resp = client.post(&complete_url).header("X-Aether-Upload-Duration", format!("{:.6}", duration)).json(&complete_body).send().await.map_err(|e| CliError::with_source(CliErrorKind::Runtime("multipart complete failed".into()), e))?;
+    let resp = client.post(&complete_url).header("X-Aether-Upload-Duration", format!("{:.6}", duration)).header("X-Trace-Id", trace_id).json(&complete_body).send().await.map_err(|e| CliError::with_source(CliErrorKind::Runtime("multipart complete failed".into()), e))?;
     if !resp.status().is_success() { return Err(CliError::new(CliErrorKind::Runtime(format!("multipart complete status {}", resp.status()))).into()); }
     // create deployment referencing stored artifact
     let dep_body = serde_json::json!({"app_name": app_name, "artifact_url": storage_key, "dev_hot": dev_hot});
     let dep_url = format!("{}/deployments", base.trim_end_matches('/'));
-    let _ = client.post(&dep_url).json(&dep_body).send().await; // ignore error
+    let _ = client.post(&dep_url).json(&dep_body).header("X-Trace-Id", trace_id).send().await; // ignore error
     Ok(storage_key)
 }
 

@@ -74,7 +74,10 @@ async fn verify_signature_if_present(db: &sqlx::Pool<sqlx::Postgres>, app_name: 
             }
         }
     }
-    if !verified { return Err(ApiError::bad_request("signature verification failed")); }
+    if !verified {
+        crate::telemetry::ARTIFACT_VERIFY_FAILURE_TOTAL.with_label_values(&[app_name, "verify_failed"]).inc();
+        return Err(ApiError::bad_request("signature verification failed"));
+    }
     Ok(())
 }
 

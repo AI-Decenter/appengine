@@ -93,6 +93,115 @@ Nâng nền tảng supply chain: chuẩn hóa SBOM theo CycloneDX, phục vụ p
 * Có thể tái sử dụng manifest file hash list để xây component hashes nhanh.
 * Mở rộng signing: sign CBOR hoặc JSON canonicalized để ổn định chữ ký.
 
+## PromQL Snippets & Recording Rules (Proposed)
+Các biểu thức dưới đây phục vụ dashboard và alerting cơ bản cho chuỗi cung ứng.
+
+### Raw Metrics (hiện có)
+- provenance_emitted_total{app="<app>"}
+- attestation_signed_total{app="<app>"}
+- sbom_invalid_total
+- provenance_wait_time_seconds (Histogram)
+- sbom_upload_status_total{status=...}
+- sbom_validation_total{result=...}
+
+### Recording Rules (YAML gợi ý)
+```yaml
+groups:
+	- name: aether_supply_chain.rules
+		interval: 30s
+		rules:
+			# Tỷ lệ SBOM invalid trên tổng upload CycloneDX
+			- record: aether:sbom_invalid_ratio:5m
+				expr: |
+					sum(increase(sbom_invalid_total[5m]))
+					/
+					clamp_min(sum(increase(sbom_upload_status_total{status=~"cyclonedx_(valid|invalid)"}[5m])), 1)
+
+			# Tỷ lệ chứng thực có chữ ký DSSE (coverage) per app
+			- record: aether:attestation_coverage:5m
+				expr: |
+					sum by (app) (increase(attestation_signed_total[5m]))
+					/
+					clamp_min(sum by (app) (increase(provenance_emitted_total[5m])), 1)
+
+			# p50 / p90 / p99 thời gian chờ provenance enforced
+			- record: aether:provenance_wait_p50_seconds
+				expr: histogram_quantile(0.50, sum by (le) (rate(provenance_wait_time_seconds_bucket[5m])))
+			- record: aether:provenance_wait_p90_seconds
+				expr: histogram_quantile(0.90, sum by (le) (rate(provenance_wait_time_seconds_bucket[5m])))
+			- record: aether:provenance_wait_p99_seconds
+				expr: histogram_quantile(0.99, sum by (le) (rate(provenance_wait_time_seconds_bucket[5m])))
+
+			# Throughput provenance (tài liệu/ phút)
+			- record: aether:provenance_throughput_per_minute
+				expr: sum(increase(provenance_emitted_total[5m])) / 5 * 60
+
+			# SBOM validation failure rate per minute
+			- record: aether:sbom_validation_fail_rate_per_minute
+				expr: sum(increase(sbom_validation_total{result="fail"}[5m])) / 5 * 60
+
+			# Deployment bị chặn do thiếu chữ ký / provenance (placeholder nếu bổ sung counter riêng)
+			# - record: aether:deploy_blocked_rate_per_minute
+			#   expr: sum(increase(deploy_blocked_total[5m])) / 5 * 60
+
+			# Thời lượng trung bình chờ provenance (mean)
+			- record: aether:provenance_wait_mean_seconds:5m
+				expr: |
+					sum(rate(provenance_wait_time_seconds_sum[5m]))
+					/
+					clamp_min(sum(rate(provenance_wait_time_seconds_count[5m])), 1)
+```
+
+### Dashboard Query Examples
+| Panel | PromQL |
+|-------|--------|
+| SBOM Invalid Ratio | aether:sbom_invalid_ratio:5m |
+| Attestation Coverage (per app) | aether:attestation_coverage:5m |
+| Provenance Wait p99 | aether:provenance_wait_p99_seconds |
+| Provenance Wait Distribution | sum by (le) (rate(provenance_wait_time_seconds_bucket[5m])) |
+| SBOM Validation Fail Rate (/min) | aether:sbom_validation_fail_rate_per_minute |
+| Provenance Throughput (/min) | aether:provenance_throughput_per_minute |
+| Provenance Wait Mean | aether:provenance_wait_mean_seconds:5m |
+
+### Alerting Suggestions
+```yaml
+groups:
+	- name: aether_supply_chain.alerts
+		interval: 1m
+		rules:
+			- alert: HighSbomInvalidRatio
+				expr: aether:sbom_invalid_ratio:5m > 0.05
+				for: 10m
+				labels:
+					severity: warning
+				annotations:
+					summary: >-
+						SBOM invalid ratio >5% (5m)
+			- alert: ProvenanceWaitHighP99
+				expr: aether:provenance_wait_p99_seconds > 15
+				for: 5m
+				labels:
+					severity: warning
+				annotations:
+					summary: >-
+						p99 provenance enforced wait >15s
+			- alert: LowAttestationCoverage
+				expr: aether:attestation_coverage:5m < 0.9
+				for: 15m
+				labels:
+					severity: warning
+				annotations:
+					summary: >-
+						DSSE attestation coverage <90% (rolling 5m)
+```
+
+### Ghi chú triển khai
+* clamp_min tránh chia cho 0 khi traffic thấp.
+* Có thể tách recording groups khác nhau (latency vs coverage) để tối ưu.
+* Khi thêm counter deploy_blocked_total thì bật lại rule blocked.
+* Dashboard nên thêm annotation khi thay đổi key rotation / policy.
+
+
 ## Rủi Ro & Mitigation
 | Rủi ro | Ảnh hưởng | Giảm thiểu |
 |--------|-----------|------------|
