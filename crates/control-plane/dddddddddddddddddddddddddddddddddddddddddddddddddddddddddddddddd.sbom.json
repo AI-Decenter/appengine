@@ -1,0 +1,1 @@
+{"bomFormat":"CycloneDX","components":[{"name":"x","type":"container"}],"dependencies":[{"dependsOn":[],"ref":"x"}],"specVersion":"1.5"}

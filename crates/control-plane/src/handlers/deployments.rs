@@ -110,20 +110,53 @@ pub async fn create_deployment(State(state): State<AppState>, Json(req): Json<Cr
     let digest_opt = resolved_digest.clone();
     let signature = req.signature.clone();
     let dev_hot = req.dev_hot;
-    tokio::spawn(async move {
-        let digest = digest_opt.as_deref().unwrap_or("");
-        if let Err(e) = crate::k8s::apply_deployment(&app_name, digest, &artifact_url, "default", signature.as_deref(), dev_hot).await {
-            tracing::error!(error=%e, app=%app_name, "k8s apply failed");
-        } else {
-            tracing::info!(app=%app_name, "k8s apply scheduled");
-            if let Err(e) = crate::provenance::write_provenance(&app_name, digest, signature.is_some()) { tracing::warn!(error=%e, app=%app_name, "provenance_write_failed"); } else {
-                // best-effort flag set
-                let _ = sqlx::query("UPDATE artifacts SET provenance_present=TRUE WHERE digest=$1")
-                    .bind(digest)
-                    .execute(&state.db).await;
-            }
+    let enforce_prov = std::env::var("AETHER_REQUIRE_PROVENANCE").unwrap_or_default()=="1";
+    if enforce_prov && resolved_digest.is_some() {
+        // Apply k8s first (non-blocking) then synchronously write provenance and wait until file appears
+        let digest_string = resolved_digest.clone().unwrap();
+        let app_name_clone = app_name.clone();
+        let artifact_url_clone = artifact_url.clone();
+        let signature_clone = signature.clone();
+        let deploy_digest = digest_string.clone();
+        tokio::spawn(async move {
+            let dg = deploy_digest.clone();
+            if let Err(e) = crate::k8s::apply_deployment(&app_name_clone, &dg, &artifact_url_clone, "default", signature_clone.as_deref(), dev_hot).await {
+                tracing::error!(error=%e, app=%app_name_clone, "k8s apply failed");
+            } else { tracing::info!(app=%app_name_clone, "k8s apply scheduled (enforced provenance mode)"); }
+        });
+        let start = std::time::Instant::now();
+        if let Err(e) = crate::provenance::write_provenance(&app_name, &digest_string, signature.is_some()) { tracing::warn!(error=%e, app=%app_name, "provenance_write_failed"); } else {
+            let _ = sqlx::query("UPDATE artifacts SET provenance_present=TRUE WHERE digest=$1")
+                .bind(&digest_string)
+                .execute(&state.db).await;
         }
-    });
+        // Wait for file existence (idempotent) up to timeout
+        let timeout_secs = std::env::var("AETHER_PROVENANCE_WAIT_SECS").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(8);
+        let prov_dir = std::env::var("AETHER_PROVENANCE_DIR").unwrap_or_else(|_| "/tmp/provenance".into());
+        let pattern = format!("{}/{}-{}.prov2.json", prov_dir, app_name, digest_string);
+        let mut found = false;
+        while start.elapsed() < std::time::Duration::from_secs(timeout_secs) {
+            if std::path::Path::new(&pattern).exists() { found = true; break; }
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        }
+        crate::telemetry::PROVENANCE_WAIT_TIME.observe(start.elapsed().as_secs_f64());
+        if !found { return Err(ApiError::bad_request("provenance required but not materialized (timeout)")); }
+    } else {
+        tokio::spawn(async move {
+            let digest = digest_opt.as_deref().unwrap_or("");
+            if let Err(e) = crate::k8s::apply_deployment(&app_name, digest, &artifact_url, "default", signature.as_deref(), dev_hot).await {
+                tracing::error!(error=%e, app=%app_name, "k8s apply failed");
+            } else {
+                tracing::info!(app=%app_name, "k8s apply scheduled");
+                if let Err(e) = crate::provenance::write_provenance(&app_name, digest, signature.is_some()) { tracing::warn!(error=%e, app=%app_name, "provenance_write_failed"); } else {
+                    // best-effort flag set
+                    let _ = sqlx::query("UPDATE artifacts SET provenance_present=TRUE WHERE digest=$1")
+                        .bind(digest)
+                        .execute(&state.db).await;
+                }
+            }
+        });
+    }
     Ok((StatusCode::CREATED, Json(CreateDeploymentResponse { id: deployment.id, status: "pending" })))
 }
 

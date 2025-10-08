@@ -5,3 +5,4 @@ pub mod apps;
 pub mod readiness;
 pub mod artifacts;
 pub mod provenance;
+pub mod keys; // provenance key metadata listing

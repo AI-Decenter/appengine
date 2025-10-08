@@ -318,13 +318,29 @@ fn generate_sbom(root:&Path, artifact:&Path, manifest:&Manifest, cyclonedx: bool
     if cyclonedx {
         // Enriched CycloneDX 1.5 JSON structure (subset) with dependency graph & hashes
         #[derive(Serialize)] struct HashObj { alg: &'static str, content: String }
-        #[allow(non_snake_case)]
-        #[derive(Serialize)] struct Component { #[serde(rename="type")] ctype: &'static str, #[serde(rename="bomRef")] bom_ref: String, name: String, version: Option<String>, hashes: Vec<HashObj>, purl: Option<String> }
+    #[allow(non_snake_case)]
+    #[derive(Serialize)] struct Component { #[serde(rename="type")] ctype: &'static str, #[serde(rename="bomRef")] bom_ref: String, name: String, version: Option<String>, hashes: Vec<HashObj>, purl: Option<String>, #[serde(skip_serializing_if="Option::is_none")] files: Option<Vec<SbomFile>> }
+    #[derive(Serialize)] struct SbomFile { path: String, sha256: String }
         #[allow(non_snake_case)]
         #[derive(Serialize)] struct MetadataComponent { #[serde(rename="type")] ctype: &'static str, name: String, version: Option<String>, #[serde(rename="bomRef")] bom_ref: String }
         #[derive(Serialize)] struct Metadata { component: MetadataComponent }
         #[allow(non_snake_case)]
-        #[derive(Serialize)] struct Cyclone<'a> { #[serde(rename="bomFormat")] bom_format: &'static str, #[serde(rename="specVersion")] spec_version: &'static str, #[serde(rename="serialNumber")] serial_number: String, version: u32, metadata: Metadata, components: Vec<Component>, #[serde(skip_serializing_if="Vec::is_empty")] dependencies: Vec<serde_json::Value>, #[serde(rename="x-manifest-digest")] manifest_digest: &'a str, #[serde(rename="x-total-files")] total_files: usize, #[serde(rename="x-total-size")] total_size: u64 }
+        #[derive(Serialize)] struct Cyclone<'a> {
+            #[serde(rename="bomFormat")] bom_format: &'static str,
+            #[serde(rename="specVersion")] spec_version: &'static str,
+            #[serde(rename="serialNumber")] serial_number: String,
+            version: u32,
+            metadata: Metadata,
+            components: Vec<Component>,
+            #[serde(skip_serializing_if="Vec::is_empty")] dependencies: Vec<serde_json::Value>,
+            #[serde(skip_serializing_if="Option::is_none")] services: Option<Vec<serde_json::Value>>,
+            #[serde(skip_serializing_if="Option::is_none")] compositions: Option<Vec<serde_json::Value>>,
+            #[serde(skip_serializing_if="Option::is_none")] vulnerabilities: Option<Vec<serde_json::Value>>,
+            #[serde(rename="x-manifest-digest")] manifest_digest: &'a str,
+            #[serde(rename="x-total-files")] total_files: usize,
+            #[serde(rename="x-total-size")] total_size: u64,
+            #[serde(rename="x-files-truncated", skip_serializing_if="Option::is_none")] files_truncated: Option<bool>
+        }
         // Build per-dependency pseudo hashes by grouping manifest entries under node_modules/<dep>/
         use std::collections::HashMap;
         let mut dep_hashes: HashMap<String, Sha256> = HashMap::new();
@@ -342,6 +358,11 @@ fn generate_sbom(root:&Path, artifact:&Path, manifest:&Manifest, cyclonedx: bool
             }
         }
         let mut dep_components: Vec<Component> = Vec::new();
+        // Prepare optional per-file listing if extended mode
+        let extended = std::env::var("AETHER_CYCLONEDX_EXTENDED").ok().as_deref()==Some("1");
+        let advanced = std::env::var("AETHER_CYCLONEDX_ADVANCED").ok().as_deref()==Some("1");
+        let mut files_truncated = false;
+        let per_dep_file_limit: usize = std::env::var("AETHER_CYCLONEDX_FILES_PER_DEP_LIMIT").ok().and_then(|v| v.parse().ok()).unwrap_or(200);
         for (name,spec) in deps_vec.iter() {
             let bom_ref_val = format!("pkg:{}", name);
             let mut hashes: Vec<HashObj> = Vec::new();
@@ -355,18 +376,35 @@ fn generate_sbom(root:&Path, artifact:&Path, manifest:&Manifest, cyclonedx: bool
             }
             let norm_ver = spec.trim_start_matches(['^','~']);
             let purl = Some(format!("pkg:npm/{name}@{norm_ver}"));
-            dep_components.push(Component { ctype: "library", bom_ref: bom_ref_val, name: name.clone(), version: Some(spec.clone()), hashes, purl });
+            // Optional file list scanning manifest entries
+            let mut file_list: Option<Vec<SbomFile>> = None;
+            if extended {
+                let mut collected: Vec<SbomFile> = Vec::new();
+                for f in &manifest.files {
+                    if f.path.starts_with(&format!("node_modules/{}/", name)) {
+                        collected.push(SbomFile { path: f.path.clone(), sha256: f.sha256.clone() });
+                        if collected.len() >= per_dep_file_limit { files_truncated = true; break; }
+                    }
+                }
+                if !collected.is_empty() { file_list = Some(collected); }
+            }
+            dep_components.push(Component { ctype: "library", bom_ref: bom_ref_val, name: name.clone(), version: Some(spec.clone()), hashes, purl, files: file_list });
         }
         let app_name = pkg.as_ref().and_then(|p| p.name.clone()).unwrap_or_else(|| "app".into());
         let version = pkg.as_ref().and_then(|p| p.version.clone());
         let app_bom_ref_val = format!("app:{}", app_name);
-        let root_component = Component { ctype: "application", bom_ref: app_bom_ref_val.clone(), name: app_name.clone(), version: version.clone(), hashes: vec![HashObj { alg: "SHA-256", content: manifest_digest.clone() }], purl: None };
+    let root_component = Component { ctype: "application", bom_ref: app_bom_ref_val.clone(), name: app_name.clone(), version: version.clone(), hashes: vec![HashObj { alg: "SHA-256", content: manifest_digest.clone() }], purl: None, files: None };
         let serial = format!("urn:uuid:{}", uuid::Uuid::new_v4());
         let mut components = dep_components;
         components.push(root_component);
         // Dependencies section: root depends on each lib
         let dependencies: Vec<serde_json::Value> = if !deps_vec.is_empty() { vec![serde_json::json!({"ref": app_bom_ref_val, "dependsOn": components.iter().filter(|c| c.ctype=="library").map(|c| c.bom_ref.clone()).collect::<Vec<_>>()})] } else { vec![] };
-        let doc = Cyclone { bom_format: "CycloneDX", spec_version: "1.5", serial_number: serial, version: 1, metadata: Metadata { component: MetadataComponent { ctype: "application", name: app_name, version: version.clone(), bom_ref: app_bom_ref_val } }, components, dependencies, manifest_digest: &manifest_digest, total_files: manifest.total_files, total_size: manifest.total_size };
+    // Advanced sections (services/compositions/vulnerabilities)
+    let services = if advanced { Some(vec![serde_json::json!({"bomRef":"service:app","name":"app-service","dependsOn": components.iter().filter(|c| c.ctype=="library").map(|c| c.bom_ref.clone()).collect::<Vec<_>>()})]) } else { None };
+    let compositions = if advanced { Some(vec![serde_json::json!({"aggregate":"complete"})]) } else { None };
+    let vulnerabilities = if advanced { if let Ok(vf) = std::env::var("AETHER_CYCLONEDX_VULN_FILE") { if let Ok(raw) = fs::read_to_string(&vf) { if let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) { Some(json.as_array().cloned().unwrap_or_default()) } else { None } } else { None } } else { None } } else { None };
+    let vuln_array = vulnerabilities.map(|arr| arr.into_iter().map(|v| v).collect());
+    let doc = Cyclone { bom_format: "CycloneDX", spec_version: "1.5", serial_number: serial, version: 1, metadata: Metadata { component: MetadataComponent { ctype: "application", name: app_name, version: version.clone(), bom_ref: app_bom_ref_val } }, components, dependencies, services, compositions, vulnerabilities: vuln_array, manifest_digest: &manifest_digest, total_files: manifest.total_files, total_size: manifest.total_size, files_truncated: if files_truncated { Some(true) } else { None } };
         fs::write(&path, serde_json::to_vec_pretty(&doc)?)?;
         info!(event="deploy.sbom", format="cyclonedx", enriched=true, path=%path.display(), files=manifest.total_files);
     } else {

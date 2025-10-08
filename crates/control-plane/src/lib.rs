@@ -153,6 +153,7 @@ pub fn build_router(state: AppState) -> Router {
     .route("/provenance", get(handlers::provenance::list_provenance))
     .route("/provenance/:digest", get(handlers::provenance::get_provenance))
     .route("/provenance/:digest/attestation", get(handlers::provenance::get_attestation))
+    .route("/provenance/keys", get(handlers::keys::list_keys))
         .route("/apps", post(create_app))
         .route("/apps", get(list_apps))
         .route("/apps/:app_name/deployments", get(app_deployments))

@@ -11,7 +11,7 @@ Nâng nền tảng supply chain: chuẩn hóa SBOM theo CycloneDX, phục vụ p
 | Gắn SBOM URL vào artifact record | DONE | `upload_sbom` cập nhật cột sbom_url (/artifacts/{digest}/sbom) |
 | Endpoint `GET /artifacts/{digest}/sbom` | DONE | Trả file `<digest>.sbom.json` từ `AETHER_SBOM_DIR` (simple static read) |
 | Server verify chữ ký artifact (env gated) | DONE | `AETHER_REQUIRE_SIGNATURE=1` -> bắt buộc chữ ký & verify pubkey(s) trước deploy |
-| Provenance document emission | PARTIAL (v1+v2) | v1 basic + v2 (sbom_sha256, materials, dsse envelope, provenance_emitted_total metric) – still not full in-toto/SLSA |
+| Provenance document emission | DONE (v1+v2 enriched) | v1 basic + v2 (sbom_sha256, enriched materials, SLSA-style builder/invocation/completeness, dsse envelope, provenance_emitted_total) |
 | Dedicated signature failure metric | DONE (Issue 05) | `dev_hot_signature_fail_total` |
 | SBOM validation server-side | DONE (subset + strict deploy check) | jsonschema subset/full + size limits + metrics + deploy-time validated flag |
 | Full CycloneDX schema validation (env gated) | DONE (AETHER_CYCLONEDX_FULL_SCHEMA) | Extended schema sections (components, dependencies) |
@@ -21,7 +21,7 @@ Nâng nền tảng supply chain: chuẩn hóa SBOM theo CycloneDX, phục vụ p
 | Manifest upload + digest cross-check | DONE (Phase 3) | /artifacts/{digest}/manifest + manifest_digest ↔ SBOM x-manifest-digest enforcement |
 | Strict SBOM deploy enforcement | DONE (Phase 3) | Enforce sbom_validated & manifest_digest match when AETHER_ENFORCE_SBOM=1 |
 | Extended metrics (provenance_emitted_total, sbom_invalid_total) | DONE (Phase 3) | Added new counters |
-| Attach provenance link vào metadata | PARTIAL | Stored files + provenance_present DB flag (no listing endpoint yet) |
+| Attach provenance link vào metadata | DONE | Stored files + provenance_present DB flag + listing endpoints + enforced wait (optional) |
 
 ## Hiện tại (Current Implementation)
 1. CLI sinh SBOM JSON tùy biến `aether-sbom-v1` (files, dependencies, manifest digest).
@@ -38,26 +38,19 @@ Nâng nền tảng supply chain: chuẩn hóa SBOM theo CycloneDX, phục vụ p
 | S1 | SBOM hợp lệ validator | CHƯA | Cần library hoặc schema validation CycloneDX 1.5 |
 | S2 | Chữ ký sai | PASS | Trả về 400 khi signature không hợp lệ / thiếu (flag bật) |
 
-## Thiếu / Gaps
-* Advanced CycloneDX sections (services, compositions, vulnerabilities) vẫn chưa parse.
-* Per-file content hashing for dependencies (only aggregated + integrity) chưa đầy đủ reproducibility proof.
-* Per-file content hashing for dependencies (only aggregated + integrity) chưa đầy đủ reproducibility proof.
-* Advanced CycloneDX sections (services, compositions, vulnerabilities) vẫn chưa parse.
-* Gzip / content negotiation cho SBOM & provenance (basic gzip + ETag) đã triển khai.
-* Lockfile materials ingestion sâu (as materials list) chưa thực hiện.
-* Public key rotation metadata chưa.
-* Đã có gzip + ETag negotiation SBOM & provenance (cần mở rộng streaming/threshold sau này).
-* Lockfile materials ingestion chưa thực hiện.
+## Thiếu / Gaps (Updated)
+* PromQL recording rules docs (ratios, coverage) chưa commit.
+* Per-file reproducibility deeper (currently per-dep aggregated + optional file inventories, need deterministic build reproducibility flag refinement).
+* Public key retirement tests & automated keystore rotation policy (keystore listing endpoint added, rotation env supported).
+* Vulnerability severity normalization & mapping (current ingestion is raw pass-through when enabled).
+* Optional reproducible build detection (set metadata.reproducible=true when criteria met) pending.
 
-## Next-Up / Roadmap (Phase 3)
-1. Per-file dependency hash listing or nested components for deeper provenance.
-2. Extended CycloneDX sections (services, compositions, vulnerabilities) opt-in parsing.
-3. In-toto/SLSA enrichment: builder.id, buildType, invocation/environment, completeness attestations.
-4. Backfill job phase 2: enrich placeholder -> full materials + dry-run + idempotency.
-5. Public key rotation & expiry metadata + rotation policy doc.
-6. Lockfile materials as provenance materials entries.
-7. Ghi nhận tỷ lệ sbom_invalid_total qua PromQL recording rules.
-8. (Optional) Per-file reproducibility proofs (component hashes nested) beyond current aggregated approach.
+## Next-Up / Roadmap (Phase 4)
+1. PromQL recording rules & dashboards (invalid ratio, provenance latency percentiles, coverage gauges).
+2. Reproducible build heuristic + set metadata.reproducible=true (e.g. deterministic bundler path, lockfile present, no unstaged changes hash provided in future).
+3. Key retirement automation: mark old key status=retired, dual-sign window tests.
+4. Vulnerability feed normalization (severity mapping, dedupe by ID/source) & optional policy gating.
+5. Backfill phase 2: enrich legacy minimal SBOMs with dependency graph + manifest digest retroactively.
 
 ## Phân Công Gợi Ý (Optional)
 | Task | Độ ưu tiên | Effort |
@@ -81,12 +74,12 @@ Nâng nền tảng supply chain: chuẩn hóa SBOM theo CycloneDX, phục vụ p
 - [x] Policy `AETHER_ENFORCE_SBOM` (basic presence)
 - [x] Strict deploy enforcement (validated + digest match)
 - [x] Metrics coverage (SBOM, signature, provenance gauges)
-- [ ] In-toto style provenance nâng cao (v2 partial: materials placeholder only)
+- [x] In-toto style provenance nâng cao (v2 enriched builder/invocation/completeness)
 - [x] Backfill legacy artifacts (phase 1 minimal SBOM + provenance)
 - [x] Gzip + ETag negotiation SBOM & provenance
 - [x] DSSE Attestation bundling (signed if AETHER_ATTESTATION_SK provided)
 - [x] Cache headers / ETag SBOM endpoint
-- [ ] Public key rotation metadata
+- [x] Public key rotation metadata (listing endpoint + multi-key signing env) (follow-up: automated retirement tests)
 - [x] Manifest upload + digest cross-check
 - [x] provenance_emitted_total metric
 - [x] sbom_invalid_total metric

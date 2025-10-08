@@ -83,6 +83,11 @@ pub static PROVENANCE_EMITTED_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     REGISTRY.register(Box::new(c.clone())).ok();
     c
 });
+pub static PROVENANCE_WAIT_TIME: Lazy<prometheus::Histogram> = Lazy::new(|| {
+    let h = prometheus::Histogram::with_opts(histogram_opts!("provenance_wait_time_seconds", "Time spent waiting for provenance (enforced mode)")).unwrap();
+    REGISTRY.register(Box::new(h.clone())).ok();
+    h
+});
 pub static SBOM_INVALID_TOTAL: Lazy<prometheus::IntCounter> = Lazy::new(|| {
     let c = prometheus::IntCounter::new("sbom_invalid_total", "Total invalid or mismatched SBOM uploads").unwrap();
     REGISTRY.register(Box::new(c.clone())).ok();
