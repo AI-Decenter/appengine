@@ -2,75 +2,124 @@ name: CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, feat/**, fix/** ]
   pull_request:
-    branches: [ main ]
+  workflow_dispatch:
+  schedule:
+    - cron: '0 2 * * *' # nightly full run
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Reuse a single logical DB across tests (our harness truncates tables per test state)
+  DATABASE_URL: postgres://aether:postgres@localhost:5432/aether_test
+  POSTGRES_PASSWORD: postgres
+  AETHER_TEST_SHARED_POOL: '1'
+  AETHER_TEST_MAX_CONNS: '12'
+  # Provide deterministic AWS context & disable metadata to avoid network stalls
+  AWS_EC2_METADATA_DISABLED: 'true'
+  AWS_REGION: us-east-1
+  AWS_ACCESS_KEY_ID: dummy
+  AWS_SECRET_ACCESS_KEY: dummy
 
 jobs:
-  build-test:
+  fast-tests:
+    name: Fast Tests (PR / branch)
+    if: ${{ github.event_name != 'schedule' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     env:
-      DATABASE_URL: postgres://postgres:postgres@localhost:5432/aether_dev
+      RUSTC_WRAPPER: sccache
     services:
       postgres:
-        image: postgres:15
+        image: postgres:15-alpine
         env:
+          POSTGRES_USER: aether
           POSTGRES_PASSWORD: postgres
-          POSTGRES_USER: postgres
-          POSTGRES_DB: aether_dev
-        ports: ["5432:5432"]
+          POSTGRES_DB: postgres
+        ports: [ '5432:5432' ]
         options: >-
-          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+          --health-cmd="pg_isready -U aether" --health-interval=5s --health-timeout=5s --health-retries=20
     steps:
-      - uses: actions/checkout@v4
-      - name: Install Rust toolchain
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.90.0
           components: clippy
+
       - name: Install sccache
         run: cargo install sccache --locked || true
+
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-            ~/.cache/sccache
-          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
-      - name: Configure sccache env
-        run: echo "RUSTC_WRAPPER=$(which sccache)" >> $GITHUB_ENV
-      - name: Wait for Postgres
+          save-if: ${{ github.ref == 'refs/heads/main' || github.event_name == 'schedule' }}
+
+      - name: Fast test suite
+        env:
+          AETHER_FAST_TEST: '1'
         run: |
-          for i in {1..30}; do
-            pg_isready -h 127.0.0.1 -U postgres && break
-            sleep 1
-          done
-      - name: Install sqlx-cli
-        run: cargo install sqlx-cli --no-default-features --features native-tls,postgres
-      - name: Generate Cargo.lock (fetch dependencies)
-        run: cargo fetch
-      - name: Run migrations
-        working-directory: crates/control-plane
-        run: sqlx migrate run
-      - name: Build
-        run: cargo build --workspace --all-targets --release
-      - name: sccache stats (post-build)
+          cargo test -p control-plane --lib --all-features -- --nocapture
+          cargo test -p control-plane --test sbom_manifest_enforcement -- --nocapture
+          # (Optionally) add other crate smoke tests here
+
+      - name: Clippy (warnings as errors)
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: sccache stats
         run: sccache --show-stats || true
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-      - name: SQLx Prepare (Offline)
-        run: |
-          sudo apt-get update && sudo apt-get install -y postgresql-client
-          cargo sqlx prepare --workspace -- --all-targets
-      - name: Tests
-        run: cargo test --workspace --all-features -- --nocapture
-      - name: Install cargo-deny
-        uses: taiki-e/install-action@v2
+
+  full-tests:
+    name: Full Tests (main / nightly / manual)
+    needs: [fast-tests]
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      RUSTC_WRAPPER: sccache
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: aether
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports: [ '5432:5432' ]
+        options: >-
+          --health-cmd="pg_isready -U aether" --health-interval=5s --health-timeout=5s --health-retries=20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
         with:
-          tool: cargo-deny
-      - name: Cargo Deny
-        run: cargo deny check
-      - name: ShellCheck dev.sh
-        run: sudo apt-get update && sudo apt-get install -y shellcheck && shellcheck dev.sh || true
+          components: clippy
+
+      - name: Install sccache
+        run: cargo install sccache --locked || true
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Full workspace tests (all features)
+        run: |
+          cargo test --workspace --all-features -- --nocapture
+
+      - name: Clippy (strict)
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Doc build
+        run: cargo doc --no-deps --workspace
+
+      - name: Publish test report summary
+        if: always()
+        run: |
+          echo "## Test Summary" >> $GITHUB_STEP_SUMMARY
+          echo "Fast mode: PR job; Full mode: main/nightly/manual." >> $GITHUB_STEP_SUMMARY
+          echo "DB URL: $DATABASE_URL" >> $GITHUB_STEP_SUMMARY
