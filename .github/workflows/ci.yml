@@ -66,6 +66,7 @@ jobs:
       - name: Fast test suite
         env:
           AETHER_FAST_TEST: '1'
+          EXPECT_FAST: '1'
         run: |
           cargo test -p control-plane --lib --all-features -- --nocapture
           cargo test -p control-plane --test sbom_manifest_enforcement -- --nocapture

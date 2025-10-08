@@ -3,7 +3,7 @@ use crate::AppState;
 use crate::error::{ApiError, ApiResult};
 use axum::response::IntoResponse;
 use std::path::PathBuf;
-use tracing::info;
+use tracing::{info, debug};
 use serde::Deserialize;
 use crate::models::Artifact;
 use crate::telemetry::{REGISTRY, SBOM_INVALID_TOTAL};
@@ -114,11 +114,24 @@ pub async fn upload_sbom(State(state): State<AppState>, Path(digest): Path<Strin
     let is_cyclonedx = json.get("bomFormat").is_some();
     let mut sbom_manifest_digest: Option<String> = None;
     if is_cyclonedx {
-        match validate_cyclonedx(&json) { Ok(_) => { SBOM_UPLOAD_STATUS_TOTAL.with_label_values(&["cyclonedx_valid"]).inc(); SBOM_VALIDATION_TOTAL.with_label_values(&["ok"]).inc(); }, Err(e) => { SBOM_UPLOAD_STATUS_TOTAL.with_label_values(&["cyclonedx_invalid"]).inc(); SBOM_VALIDATION_TOTAL.with_label_values(&["fail"]).inc(); SBOM_INVALID_TOTAL.inc(); return Err(ApiError::bad_request(format!("invalid CycloneDX: {e}"))); } }
+        match validate_cyclonedx(&json) {
+            Ok(_) => {
+                SBOM_UPLOAD_STATUS_TOTAL.with_label_values(&["cyclonedx_valid"]).inc();
+                SBOM_VALIDATION_TOTAL.with_label_values(&["ok"]).inc();
+            },
+            Err(e) => {
+                debug!(error=%e, digest=%digest, "sbom_cyclonedx_validation_failed");
+                SBOM_UPLOAD_STATUS_TOTAL.with_label_values(&["cyclonedx_invalid"]).inc();
+                SBOM_VALIDATION_TOTAL.with_label_values(&["fail"]).inc();
+                SBOM_INVALID_TOTAL.inc();
+                return Err(ApiError::bad_request(format!("invalid CycloneDX: {e}")));
+            }
+        }
         if let Some(md)=json.get("x-manifest-digest").and_then(|v| v.as_str()) { sbom_manifest_digest = Some(md.to_string()); }
     } else if json.get("schema").and_then(|v| v.as_str()) == Some("aether-sbom-v1") {
         SBOM_UPLOAD_STATUS_TOTAL.with_label_values(&["legacy_ok"]).inc();
     } else {
+        debug!(digest=%digest, "sbom_unsupported_format");
         SBOM_UPLOAD_STATUS_TOTAL.with_label_values(&["unsupported_format"]).inc();
         SBOM_INVALID_TOTAL.inc();
         return Err(ApiError::bad_request("unsupported SBOM format (expect CycloneDX or aether-sbom-v1)"));
@@ -146,7 +159,11 @@ pub async fn upload_sbom(State(state): State<AppState>, Path(digest): Path<Strin
             .bind(&digest)
             .fetch_optional(&state.db)
             .await {
-            if md != *sm { SBOM_INVALID_TOTAL.inc(); return Err(ApiError::bad_request("manifest digest mismatch (SBOM vs manifest)")); }
+            if md != *sm {
+                debug!(digest=%digest, sbom_manifest=%sm, manifest=%md, "sbom_manifest_digest_mismatch");
+                SBOM_INVALID_TOTAL.inc();
+                return Err(ApiError::bad_request("manifest digest mismatch (SBOM vs manifest)"));
+            }
         }
     }
     info!(digest=%digest, len=body.len(), cyclonedx=is_cyclonedx, "sbom_uploaded");

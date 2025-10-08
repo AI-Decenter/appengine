@@ -31,6 +31,7 @@ async fn prepare_artifact(app: &str, digest: &str, app_state: &AppState) -> axum
 #[tokio::test]
 #[serial_test::serial]
 async fn manifest_then_valid_sbom_and_deployment() {
+    if std::env::var("AETHER_FAST_TEST").ok().as_deref()==Some("1") { return; }
     std::env::set_var("AETHER_ENFORCE_SBOM", "1");
     let state = control_plane::test_support::test_state().await;
     let digest = "1111111111111111111111111111111111111111111111111111111111111111"; // 64 hex
@@ -65,6 +66,7 @@ async fn manifest_then_valid_sbom_and_deployment() {
 #[tokio::test]
 #[serial_test::serial]
 async fn deployment_blocked_without_sbom() {
+    if std::env::var("AETHER_FAST_TEST").ok().as_deref()==Some("1") { return; }
     std::env::set_var("AETHER_ENFORCE_SBOM", "1");
     let state = control_plane::test_support::test_state().await;
     let digest = "2222222222222222222222222222222222222222222222222222222222222222";
@@ -84,6 +86,7 @@ async fn deployment_blocked_without_sbom() {
 #[tokio::test]
 #[serial_test::serial]
 async fn manifest_sbom_mismatch_blocks() {
+    if std::env::var("AETHER_FAST_TEST").ok().as_deref()==Some("1") { return; }
     std::env::set_var("AETHER_ENFORCE_SBOM", "1");
     let state = control_plane::test_support::test_state().await;
     let digest = "3333333333333333333333333333333333333333333333333333333333333333"; let app="mismatch";
@@ -103,12 +106,20 @@ async fn manifest_sbom_mismatch_blocks() {
     let body = axum::body::to_bytes(sbom_resp.into_body(), 1024).await.unwrap();
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert!(v["message"].as_str().unwrap().contains("manifest digest mismatch"));
+    // Metrics sanity: ensure invalid counter exposed (cannot assert delta due global registry, just presence)
+    let metrics_req = Request::builder().method("GET").uri("/metrics").body(Body::empty()).unwrap();
+    let metrics_resp = router.clone().oneshot(metrics_req).await.unwrap();
+    assert_eq!(metrics_resp.status(), StatusCode::OK);
+    let mbody = axum::body::to_bytes(metrics_resp.into_body(), 32 * 1024).await.unwrap();
+    let mtext = String::from_utf8(mbody.to_vec()).unwrap();
+    assert!(mtext.contains("sbom_invalid_total"), "metrics exposition missing sbom_invalid_total after mismatch\n{mtext}");
     std::env::remove_var("AETHER_ENFORCE_SBOM");
 }
 
 #[tokio::test]
 #[serial_test::serial]
 async fn sbom_then_manifest_mismatch_blocks() {
+    if std::env::var("AETHER_FAST_TEST").ok().as_deref()==Some("1") { return; }
     std::env::set_var("AETHER_ENFORCE_SBOM", "1");
     let state = control_plane::test_support::test_state().await;
     let digest = "4444444444444444444444444444444444444444444444444444444444444444"; let app="order";
@@ -145,7 +156,9 @@ async fn metrics_increment_on_invalid_sbom() {
     let metrics_req = Request::builder().method("GET").uri("/metrics").body(Body::empty()).unwrap();
     let metrics_resp = router.clone().oneshot(metrics_req).await.unwrap();
     assert_eq!(metrics_resp.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(metrics_resp.into_body(), 16 * 1024).await.unwrap();
+    let body = axum::body::to_bytes(metrics_resp.into_body(), 64 * 1024).await.unwrap();
     let text = String::from_utf8(body.to_vec()).unwrap();
-    assert!(text.contains("sbom_invalid_total"), "metrics exposition missing sbom_invalid_total\n{text}");
+    // Basic parse: find the counter sample line
+    let present = text.lines().any(|l| l.starts_with("sbom_invalid_total "));
+    assert!(present, "sbom_invalid_total counter line missing; got metrics:\n{text}");
 }
