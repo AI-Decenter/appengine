@@ -72,9 +72,13 @@ CREATE TABLE IF NOT EXISTS public_keys (id BLOB PRIMARY KEY DEFAULT (lower(hex(r
     // 2. If running under CI (CI env set) -> enable shared to cut connection churn
     // 3. If an external DATABASE_URL is provided -> enable shared (avoid repeated migrations)
     // 4. Fallback: per-test pool
+    // IMPORTANT: Sharing a PgPool across #[tokio::test] functions (each with its own runtime)
+    // can cause runtime shutdown errors (e.g., "A Tokio 1.x context was found, but it is being shutdown.").
+    // Default to per-test pools to ensure each test's runtime owns its connections.
+    // Opt-in to shared pool only when callers ensure a single runtime (e.g., single-threaded test runner).
     let use_shared = match std::env::var("AETHER_TEST_SHARED_POOL") {
         Ok(v) => v=="1" || v.eq_ignore_ascii_case("true"),
-        Err(_) => true, // default to shared for stability and performance
+        Err(_) => false,
     };
     if use_shared {
         use tokio::sync::OnceCell;
