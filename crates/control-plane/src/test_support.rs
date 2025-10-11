@@ -116,7 +116,8 @@ async fn build_test_pool(shared: bool) -> Pool<Postgres> {
     // Cap max connections per-process to reduce server contention in CI
     let requested = max_conns;
     // Raise in non-CI to reduce PoolTimedOut; conservative in CI
-        let cap = if std::env::var("CI").is_ok() { requested.min(8).max(8) } else { requested.min(10).max(10) };
+    let cap: u32 = if std::env::var("CI").is_ok() { 8 } else { 10 };
+    let cap = requested.min(cap);
         let default_timeout = if std::env::var("CI").is_ok() { 20 } else { 6 };
     let acquire_secs = std::env::var("AETHER_TEST_DB_ACQUIRE_TIMEOUT_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(default_timeout);
     opts = opts
