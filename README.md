@@ -399,6 +399,60 @@ Quick Start:
 1. Ensure Linux host with Docker (and optionally Snap if using MicroK8s).
 2. Option A (script): `./dev.sh bootstrap`
 
+---
+
+## 11. Testing (Control Plane)
+
+Fast, reliable tests depend on sane DB pool and background settings. The harness in `crates/control-plane/src/test_support.rs` provides defaults that work well locally and in CI.
+
+Key environment flags (defaults in tests):
+
+- AETHER_DISABLE_BACKGROUND=1 – disables background loops (metrics refreshers, GC timers)
+- AETHER_DISABLE_WATCH=1 – disables k8s watch tasks in tests
+- AETHER_STORAGE_MODE=mock – uses a mock storage backend (no network)
+- AETHER_FAST_TEST=1 – skips heavy external validations where supported
+- AETHER_MAX_CONCURRENT_CONTROL=4 – limits DB-bound handler concurrency
+- AETHER_TEST_MAX_CONNS=8 – Postgres pool max connections for tests
+
+Optional:
+
+- DATABASE_URL – Postgres connection string (preferred when Docker is not available)
+- AETHER_FORCE_TESTCONTAINERS=1 – use testcontainers-backed Postgres for isolation
+
+Recommended setups:
+
+1) Local Postgres (no Docker):
+
+```bash
+export DATABASE_URL=postgres://user:pass@localhost:5432/aether_test
+cargo test -p control-plane --tests -q
+```
+
+Optionally increase pool size slightly on fast machines:
+
+```bash
+AETHER_TEST_MAX_CONNS=12 cargo test -p control-plane --tests -q
+```
+
+2) Testcontainers (requires Docker):
+
+```bash
+AETHER_FORCE_TESTCONTAINERS=1 cargo test -p control-plane --tests -q
+```
+
+Run focused suites:
+
+```bash
+cargo test -p control-plane --test artifacts -q
+cargo test -p control-plane --test upload_integrity -q
+```
+
+Notes:
+
+- The test harness creates helpful indexes at startup to keep queries fast.
+- Connection/lock timeouts are short to fail fast rather than hang; if your DB is slow, raise `AETHER_TEST_DB_ACQUIRE_TIMEOUT_SECS`.
+- Background tasks are disabled in tests to avoid pool starvation.
+
 ### 10.1 Test Database Strategy (PostgreSQL)
 
 Integration & migration tests now use a Docker ephemeral Postgres (via `testcontainers`) by default when `DATABASE_URL` is not set. This replaces the previous `pg-embed` binary extraction approach (which was fragile in CI with cached/corrupt archives). Behavior:
