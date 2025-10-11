@@ -105,7 +105,7 @@ pub fn build_router(state: AppState) -> Router {
             crate::k8s_watch::run_deployment_status_watcher(db_status).await;
         });
     }
-    // Coverage metrics updater (not gated by watch disable)
+    // Coverage metrics updater (also gated by AETHER_DISABLE_BACKGROUND to reduce DB churn in tests)
     if std::env::var("AETHER_DISABLE_BACKGROUND").ok().as_deref() != Some("1") {
         let db_metrics = state.db.clone();
         tokio::spawn(async move {

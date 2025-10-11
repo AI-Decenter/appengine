@@ -28,10 +28,22 @@ async fn prepare_artifact(app: &str, digest: &str, app_state: &AppState) -> axum
     router
 }
 
+fn set_unique_dirs(tag: &str) {
+    let base = std::env::temp_dir().join(format!("aether-sbom-test-{}-{}", tag, std::process::id()));
+    // Best-effort cleanup before reuse
+    let _ = std::fs::remove_dir_all(&base);
+    let sbom = base.join("sbom");
+    let manifest = base.join("manifest");
+    let _ = std::fs::create_dir_all(&sbom);
+    let _ = std::fs::create_dir_all(&manifest);
+    std::env::set_var("AETHER_SBOM_DIR", sbom.to_string_lossy().to_string());
+    std::env::set_var("AETHER_MANIFEST_DIR", manifest.to_string_lossy().to_string());
+}
+
 #[tokio::test]
 #[serial_test::serial]
 async fn manifest_then_valid_sbom_and_deployment() {
-    if std::env::var("AETHER_FAST_TEST").ok().as_deref()==Some("1") { return; }
+    set_unique_dirs("valid");
     std::env::set_var("AETHER_ENFORCE_SBOM", "1");
     let state = control_plane::test_support::test_state().await;
     let digest = "1111111111111111111111111111111111111111111111111111111111111111"; // 64 hex
@@ -66,7 +78,7 @@ async fn manifest_then_valid_sbom_and_deployment() {
 #[tokio::test]
 #[serial_test::serial]
 async fn deployment_blocked_without_sbom() {
-    if std::env::var("AETHER_FAST_TEST").ok().as_deref()==Some("1") { return; }
+    set_unique_dirs("blocked");
     std::env::set_var("AETHER_ENFORCE_SBOM", "1");
     let state = control_plane::test_support::test_state().await;
     let digest = "2222222222222222222222222222222222222222222222222222222222222222";
@@ -86,7 +98,7 @@ async fn deployment_blocked_without_sbom() {
 #[tokio::test]
 #[serial_test::serial]
 async fn manifest_sbom_mismatch_blocks() {
-    if std::env::var("AETHER_FAST_TEST").ok().as_deref()==Some("1") { return; }
+    set_unique_dirs("mismatch1");
     std::env::set_var("AETHER_ENFORCE_SBOM", "1");
     let state = control_plane::test_support::test_state().await;
     let digest = "3333333333333333333333333333333333333333333333333333333333333333"; let app="mismatch";
@@ -119,7 +131,7 @@ async fn manifest_sbom_mismatch_blocks() {
 #[tokio::test]
 #[serial_test::serial]
 async fn sbom_then_manifest_mismatch_blocks() {
-    if std::env::var("AETHER_FAST_TEST").ok().as_deref()==Some("1") { return; }
+    set_unique_dirs("mismatch2");
     std::env::set_var("AETHER_ENFORCE_SBOM", "1");
     let state = control_plane::test_support::test_state().await;
     let digest = "4444444444444444444444444444444444444444444444444444444444444444"; let app="order";
@@ -144,6 +156,7 @@ async fn sbom_then_manifest_mismatch_blocks() {
 #[tokio::test]
 #[serial_test::serial]
 async fn metrics_increment_on_invalid_sbom() {
+    set_unique_dirs("metrics");
     let state = control_plane::test_support::test_state().await;
     let digest = "5555555555555555555555555555555555555555555555555555555555555555"; let app="metrics";
     let router = prepare_artifact(app, digest, &state).await;

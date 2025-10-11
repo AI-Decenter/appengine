@@ -13,6 +13,37 @@ static TEST_DB_URL_ENV: &str = "DATABASE_URL";
 async fn shared_pool() -> Pool<Postgres> {
     // Ensure tests never attempt live Kubernetes calls
     std::env::set_var("AETHER_DISABLE_K8S","1");
+    // Disable background loops globally for any test using shared_pool directly
+    std::env::set_var("AETHER_DISABLE_BACKGROUND","1");
+    // Disable deployment status watcher to avoid spawning long-running kube watch tasks
+    std::env::set_var("AETHER_DISABLE_WATCH", "1");
+    // Enable fast test mode by default to skip heavy validations in supported code paths
+    if std::env::var("AETHER_FAST_TEST").is_err() {
+        std::env::set_var("AETHER_FAST_TEST", "1");
+    }
+    // Prevent AWS SDK from performing IMDS / network discovery that can add seconds
+    std::env::set_var("AWS_EC2_METADATA_DISABLED", "true");
+    // Force storage to mock to avoid any S3 network use in tests
+    std::env::set_var("AETHER_STORAGE_MODE", "mock");
+    // Disable remote verification calls during tests for speed and stability
+    std::env::set_var("AETHER_VERIFY_REMOTE_SIZE", "0");
+    std::env::set_var("AETHER_VERIFY_REMOTE_DIGEST", "0");
+    std::env::set_var("AETHER_VERIFY_REMOTE_HASH", "0");
+    // Tame DB-bound endpoint concurrency in tests to avoid bursty pool exhaustion
+    if std::env::var("AETHER_MAX_CONCURRENT_CONTROL").is_err() {
+        std::env::set_var("AETHER_MAX_CONCURRENT_CONTROL", "4");
+    }
+    // Prefer using host/database provided via DATABASE_URL by default.
+    // If you explicitly want testcontainers, set AETHER_FORCE_TESTCONTAINERS=1 in your env.
+    // Provide deterministic region to skip region resolution logic
+    if std::env::var("AWS_REGION").is_err() { std::env::set_var("AWS_REGION", "us-east-1"); }
+    // Provide dummy creds to avoid credential provider chain delays (they are not used in mocked tests)
+    if std::env::var("AWS_ACCESS_KEY_ID").is_err() { std::env::set_var("AWS_ACCESS_KEY_ID", "dummy" ); }
+    if std::env::var("AWS_SECRET_ACCESS_KEY").is_err() { std::env::set_var("AWS_SECRET_ACCESS_KEY", "dummy" ); }
+    // Increase DB acquire timeout in tests unless explicitly overridden
+    if std::env::var("AETHER_TEST_DB_ACQUIRE_TIMEOUT_SECS").is_err() {
+        std::env::set_var("AETHER_TEST_DB_ACQUIRE_TIMEOUT_SECS", "30");
+    }
     // Fast path: optional sqlite for tests (AETHER_USE_SQLITE=1) to avoid heavy Postgres setup in constrained CI
     if std::env::var("AETHER_USE_SQLITE").ok().as_deref()==Some("1") {
         // Build ephemeral in-memory schema using separate sqlite pool stored globally via OnceCell
@@ -43,7 +74,7 @@ CREATE TABLE IF NOT EXISTS public_keys (id BLOB PRIMARY KEY DEFAULT (lower(hex(r
     // 4. Fallback: per-test pool
     let use_shared = match std::env::var("AETHER_TEST_SHARED_POOL") {
         Ok(v) => v=="1" || v.eq_ignore_ascii_case("true"),
-        Err(_) => std::env::var("CI").is_ok() || std::env::var(TEST_DB_URL_ENV).is_ok(),
+        Err(_) => true, // default to shared for stability and performance
     };
     if use_shared {
         use tokio::sync::OnceCell;
@@ -55,13 +86,15 @@ CREATE TABLE IF NOT EXISTS public_keys (id BLOB PRIMARY KEY DEFAULT (lower(hex(r
 
 async fn build_test_pool(shared: bool) -> Pool<Postgres> {
     // Lower default max connections to reduce contention / resource spikes in CI
-    let max_conns: u32 = std::env::var("AETHER_TEST_MAX_CONNS").ok().and_then(|v| v.parse().ok()).unwrap_or(10);
+        let max_conns: u32 = std::env::var("AETHER_TEST_MAX_CONNS").ok().and_then(|v| v.parse().ok()).unwrap_or(8);
     // Strategy: if user explicitly provided DATABASE_URL -> use it (normalized). Else directly start container.
     let maybe_external = std::env::var(TEST_DB_URL_ENV).ok();
-    let final_url = if let Some(raw) = maybe_external {
+    let force_tc = std::env::var("AETHER_FORCE_TESTCONTAINERS").ok().map(|v| v=="1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
+    let final_url = if !force_tc {
+        if let Some(raw) = maybe_external {
         let url = normalize_url_with_password(&raw);
         ensure_database(&url).await; url
-    } else {
+        } else {
         if std::env::var("AETHER_DISABLE_TESTCONTAINERS").ok().as_deref()==Some("1") {
             panic!("DATABASE_URL not set and testcontainers disabled (AETHER_DISABLE_TESTCONTAINERS=1)");
         }
@@ -69,12 +102,37 @@ async fn build_test_pool(shared: bool) -> Pool<Postgres> {
             Ok(u)=> { eprintln!("[test_pool] started testcontainer {u}"); u },
             Err(e)=> panic!("Failed starting Postgres testcontainer: {e}"),
         }
+        }
+    } else {
+        if std::env::var("AETHER_DISABLE_TESTCONTAINERS").ok().as_deref()==Some("1") {
+            panic!("AETHER_FORCE_TESTCONTAINERS=1 but AETHER_DISABLE_TESTCONTAINERS=1; conflicting settings");
+        }
+        match start_testcontainer_postgres().await {
+            Ok(u)=> { eprintln!("[test_pool] started testcontainer {u}"); u },
+            Err(e)=> panic!("Failed starting Postgres testcontainer: {e}"),
+        }
     };
     let mut opts = sqlx::postgres::PgPoolOptions::new();
-    opts = opts.max_connections(max_conns)
-        .acquire_timeout(std::time::Duration::from_secs(
-            std::env::var("AETHER_TEST_DB_ACQUIRE_TIMEOUT_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(8)
-        ));
+    // Cap max connections per-process to reduce server contention in CI
+    let requested = max_conns;
+    // Raise in non-CI to reduce PoolTimedOut; conservative in CI
+        let cap = if std::env::var("CI").is_ok() { requested.min(8).max(8) } else { requested.min(10).max(10) };
+        let default_timeout = if std::env::var("CI").is_ok() { 20 } else { 6 };
+    let acquire_secs = std::env::var("AETHER_TEST_DB_ACQUIRE_TIMEOUT_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(default_timeout);
+    opts = opts
+        .max_connections(cap)
+    .min_connections(2)
+        .test_before_acquire(true)
+        .acquire_timeout(std::time::Duration::from_secs(acquire_secs))
+        .max_lifetime(std::time::Duration::from_secs(300))
+        .idle_timeout(std::time::Duration::from_secs(30))
+        .after_connect(|conn, _meta| Box::pin(async move {
+            // Prevent long-hanging queries under lock contention
+                let _ = sqlx::query("SET statement_timeout = 12000").execute(&mut *conn).await; // 12s
+                let _ = sqlx::query("SET lock_timeout = 2000").execute(&mut *conn).await; // 2s
+                let _ = sqlx::query("SET idle_in_transaction_session_timeout = 10000").execute(&mut *conn).await; // 10s
+            Ok(())
+        }));
     let pool = opts.connect(&final_url).await.expect("connect test db");
     if shared {
         static FIRST: std::sync::Once = std::sync::Once::new();
@@ -129,11 +187,23 @@ pub async fn test_pool() -> Pool<Postgres> { shared_pool().await }
 /// Produce a fresh `AppState` for a test, cleaning mutable tables first.
 pub async fn test_state() -> AppState {
     let pool = shared_pool().await;
-    // Faster cleanup: single TRUNCATE instead of multiple DELETEs (Postgres only)
-    // Safe because tests don't depend on persisted sequences and we restart identities.
-    let _ = sqlx::query("TRUNCATE TABLE deployments, artifacts, public_keys, applications RESTART IDENTITY CASCADE").execute(&pool).await;
-    // Warm-up acquire to pre-initialize connections (reduces first-query flake on readiness)
-    if let Err(e) = pool.acquire().await { eprintln!("[test_state] warm-up acquire failed: {e}"); }
+    // Disable background tasks (metrics updaters, GC loops) during tests to reduce
+    // connection churn / pool starvation leading to PoolTimedOut under high test parallelism.
+    std::env::set_var("AETHER_DISABLE_BACKGROUND", "1");
+    // Cleanup: prefer DELETEs to avoid ACCESS EXCLUSIVE locks from TRUNCATE, which can
+    // block other concurrent test processes across binaries. Order matters due to FKs.
+    // Best-effort, ignore errors if tables absent in certain feature subsets.
+    let _ = sqlx::query("DELETE FROM artifact_events").execute(&pool).await;
+    let _ = sqlx::query("DELETE FROM deployments").execute(&pool).await;
+    let _ = sqlx::query("DELETE FROM artifacts").execute(&pool).await;
+    let _ = sqlx::query("DELETE FROM public_keys").execute(&pool).await;
+    let _ = sqlx::query("DELETE FROM applications").execute(&pool).await;
+    // Avoid warm-up acquire to reduce contention under parallel test runs
+    // Ensure optional performance indexes exist (idempotent, no-op if already applied)
+    let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_artifacts_app_status_created ON artifacts (app_id, status, created_at DESC)").execute(&pool).await;
+    let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_artifacts_digest ON artifacts (digest)").execute(&pool).await;
+    let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_artifacts_app_status_completed_id ON artifacts (app_id, status, completed_at DESC, id DESC)").execute(&pool).await;
+    let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_deployments_app_created ON deployments (app_id, created_at DESC)").execute(&pool).await;
     AppState { db: pool }
 }
 
