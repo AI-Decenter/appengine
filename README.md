@@ -1,13 +1,30 @@
 ## Benchmarks (Performance Suite)
 
-- Run benches locally (aether-cli):
-	- Outputs: `crates/aether-cli/target/benchmarks/bench-pack.json`, `bench-stream.json`
-	- Compare against baseline using the regression script
+This repo includes a small performance suite to guard against regressions.
 
-### Try it
+What we measure
+- Packaging (duration in ms)
+- Streaming upload (throughput in MB/s via a local mock server)
 
+Outputs
+- `crates/aether-cli/target/benchmarks/bench-pack.json`
+- `crates/aether-cli/target/benchmarks/bench-stream.json`
+
+Baselines (committed)
+- Packaging: `crates/aether-cli/benches/baseline/bench-pack.json`
+- Streaming: `crates/aether-cli/benches/baseline/bench-stream.json`
+
+Regression policy
+- CI emits warnings and exits non-zero when p95 degrades by > 20% vs baseline.
+
+Run locally
 ```bash
 cd appengine
+
+# Optional determinism knobs
+export RAYON_NUM_THREADS=2
+export RUST_LOG=off
+
 # Run benches
 cargo bench -p aether-cli --bench pack_bench --bench stream_bench --quiet
 
@@ -16,14 +33,17 @@ bash scripts/check-bench-regression.sh \
 	crates/aether-cli/benches/baseline/bench-pack.json \
 	crates/aether-cli/target/benchmarks/bench-pack.json
 bash scripts/check-bench-regression.sh \
-	tests/bench-fixtures/baseline_stream.json \
+	crates/aether-cli/benches/baseline/bench-stream.json \
 	crates/aether-cli/target/benchmarks/bench-stream.json
 ```
 
-### Update baseline
+Update baselines
+- After stabilizing on main, copy new JSON to the relevant file under `crates/aether-cli/benches/baseline/` and commit in a PR dedicated to baseline updates.
+- Keep inputs fixed (payload size, chunk size, warm-up/sample counts) to reduce noise.
 
-- Once performance stabilizes on main: copy the new JSON to `crates/aether-cli/benches/baseline/bench-pack.json` and commit.
-- Regression threshold: CI warns/fails when p95 worsens by more than 20% vs baseline.
+Troubleshooting
+- If JSON files are missing, ensure the benches ran and that you’re looking under the crate-local path.
+- For noisy results on laptops/VMs, pin CPU, close background workloads, and increase measurement time locally.
 
 # AetherEngine (MVP v1.0)
 
