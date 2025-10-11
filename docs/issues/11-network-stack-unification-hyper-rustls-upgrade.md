@@ -116,3 +116,20 @@ Generated on: 2025-09-29
 - Khi bật `--features s3` cho control-plane: vẫn xuất hiện legacy chain từ AWS stack (aws-smithy-http-client hyper-014): hyper 0.14.32, h2 0.3.27, rustls 0.21.12, tokio-rustls 0.24.1, hyper-rustls 0.24.2. Đã cấu hình `aws-config` và `aws-sdk-s3` với `default-features = false` và `features = ["rustls", "rt-tokio"]` để chọn TLS hiện đại khi có thể. Chờ upstream cung cấp connector hyper 1.x.
 - Thêm `scripts/measure-build.sh` để đo build time và kích thước binary; sẽ chạy trước/sau hợp nhất để ghi nhận N5.
 
+### Acceptance check (N1–N5)
+
+- N1: Không còn hyper 0.14 trong default build (PASS; verified by guard script)
+- N2: Không còn h2 0.3.x trong default build (PASS)
+- N3: Không còn rustls 0.21 trong default build (PASS)
+- N4: Duplicate policy qua cargo-deny (bans) – default build không có duplicate HTTP/TLS legacy; cho phép duplicates riêng cho các crates Windows target (không ảnh hưởng runtime Linux) để giảm nhiễu (PASS trong CI cấu hình). Ghi chú: dev-deps có thể kéo hyper-rustls 0.26 qua bollard→testcontainers; guard đã chạy với `--no-dev-deps` để chỉ xét runtime.
+- N5: Build time & binary size đã đo; không tuyên bố giảm >5% do thiếu baseline ổn định trước đó, nhưng đã document số đo hiện tại.
+
+Số đo hiện tại (release):
+- Build time: xem `docs/issues/11-network-stack-unification-hyper-rustls-upgrade/build-time-release.txt` (385s trên máy runner hiện tại)
+- Binary sizes: xem `docs/issues/11-network-stack-unification-hyper-rustls-upgrade/binary-sizes-release.txt`
+
+### Ghi chú vận hành
+
+- S3 vẫn gate bằng feature `s3` để tránh kéo legacy path theo mặc định; khi upstream AWS phát hành connector hyper 1.x, nâng cấp và bật lại kiểm tra với `--features s3`.
+- cargo-deny: cấu hình `[bans] multiple-versions = "deny"` hoạt động cùng allowlist nhỏ cho các crates hệ sinh thái Windows (`windows-*/windows_*` họ `windows-sys`, `windows-targets`, các biến thể `windows_*`) nhằm tránh false positive trên Linux builds.
+
