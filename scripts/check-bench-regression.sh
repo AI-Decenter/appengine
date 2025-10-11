@@ -4,7 +4,8 @@
 # Usage: bash scripts/check-bench-regression.sh BASE1 CUR1 [BASE2 CUR2 ...]
 # JSON schema: { bench_id, metric, unit, p50, p95, n, timestamp, notes? }
 
-set -euo pipefail
+# Be resilient locally: don't abort on first error; we handle failures and summarize
+set -uo pipefail
 
 if (( $# < 2 || ($# % 2) != 0 )); then
   echo "Usage: $0 BASELINE.json CURRENT.json [BASE2.json CUR2.json ...]" >&2
@@ -126,4 +127,5 @@ if (( failures > 0 )); then
   exit 1
 else
   echo "Overall: no regressions; worst delta $(printf '%.2f' "$worst")%"
+  exit 0
 fi
