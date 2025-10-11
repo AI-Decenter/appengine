@@ -75,6 +75,13 @@ jobs:
           cargo test -p control-plane --lib --all-features -- --nocapture
           cargo test -p control-plane --test sbom_manifest_enforcement -- --nocapture
           # (Optionally) add other crate smoke tests here
+      - name: Network stack regression check
+        run: |
+          bash scripts/check-network-stack.sh
+      - name: Cargo Deny (bans)
+        uses: EmbarkStudios/cargo-deny-action@v1
+        with:
+          command: check bans
 
       - name: Clippy (warnings as errors)
         run: cargo clippy --all-targets --all-features -- -D warnings

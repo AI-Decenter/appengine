@@ -46,8 +46,8 @@ license-files = [
 [bans]
 highlight = "all"
 wildcards = "allow"
-# Enforce single versions for critical crates going forward. Temporarily warn for others.
-multiple-versions = "warn"
+# Enforce single versions across the graph (will be satisfied after Issue 11 completion).
+multiple-versions = "deny"
 
 [sources]
 unknown-registry = "deny"
