@@ -135,3 +135,49 @@ jobs:
           echo "## Test Summary" >> $GITHUB_STEP_SUMMARY
           echo "Fast mode: PR job; Full mode: main/nightly/manual." >> $GITHUB_STEP_SUMMARY
           echo "DB URL: $DATABASE_URL" >> $GITHUB_STEP_SUMMARY
+
+  benchmarks:
+    name: Benchmarks (enforced)
+    needs: [full-tests]
+    # Run on PRs and main, and on scheduled/nightly
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.90.0
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run benches (aether-cli)
+        env:
+          RAYON_NUM_THREADS: '2'
+          RUST_LOG: 'off'
+        run: |
+          cargo bench -p aether-cli --bench pack_bench --bench stream_bench --quiet
+
+      - name: Compare to baselines (fail on regression)
+        run: |
+          # Packaging vs committed baseline
+          bash scripts/check-bench-regression.sh \
+            crates/aether-cli/benches/baseline/bench-pack.json \
+            crates/aether-cli/target/benchmarks/bench-pack.json
+          # Streaming vs committed baseline
+          bash scripts/check-bench-regression.sh \
+            crates/aether-cli/benches/baseline/bench-stream.json \
+            crates/aether-cli/target/benchmarks/bench-stream.json
+
+      - name: Upload bench artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-jsons-enforced
+          path: |
+            crates/aether-cli/target/benchmarks/*.json
+            target/criterion/**
