@@ -1,3 +1,30 @@
+## Benchmarks (Performance Suite)
+
+- Run benches locally (aether-cli):
+	- Outputs: `crates/aether-cli/target/benchmarks/bench-pack.json`, `bench-stream.json`
+	- Compare against baseline using the regression script
+
+### Try it
+
+```bash
+cd appengine
+# Run benches
+cargo bench -p aether-cli --bench pack_bench --bench stream_bench --quiet
+
+# Compare to baselines
+bash scripts/check-bench-regression.sh \
+	crates/aether-cli/benches/baseline/bench-pack.json \
+	crates/aether-cli/target/benchmarks/bench-pack.json
+bash scripts/check-bench-regression.sh \
+	tests/bench-fixtures/baseline_stream.json \
+	crates/aether-cli/target/benchmarks/bench-stream.json
+```
+
+### Update baseline
+
+- Once performance stabilizes on main: copy the new JSON to `crates/aether-cli/benches/baseline/bench-pack.json` and commit.
+- Regression threshold: CI warns/fails when p95 worsens by more than 20% vs baseline.
+
 # AetherEngine (MVP v1.0)
 
 ![CI (Main)](https://github.com/askerNQK/appengine/actions/workflows/ci.yml/badge.svg)
