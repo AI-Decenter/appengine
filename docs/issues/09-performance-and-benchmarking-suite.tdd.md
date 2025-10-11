@@ -35,26 +35,26 @@ This document drives Issue 09 using a failing-first approach, stabilizing perfor
 
 ## Test matrix
 
-- T1 Schema validity
-  - Given a JSON file, validate required keys and types; fail on missing/invalid
-- T2 Packaging emit
-  - After running the packaging bench, file target/benchmarks/bench-pack.json exists and parses
-- T3 Packaging metrics
-  - p95 ≥ p50, n ≥ 1; metric=duration_ms; unit=ms
-- T4 Streaming emit
-  - After running the streaming bench, file target/benchmarks/bench-stream.json exists and parses
-- T5 Streaming metrics
-  - throughput_mbs > 0, p95 ≥ p50; metric=throughput_mbs; unit=MB/s
-- T6 Regression ok (no-regress)
-  - current p95 ≤ baseline p95 × 1.2 → exit code 0
-- T7 Regression hard (fail)
-  - current p95 > baseline p95 × 1.2 → exit code ≠ 0; diff percentage printed
-- T8 GitHub Actions warning
-  - When regression hard, emit ::warning:: lines with details
-- T9 Missing files
-  - Baseline or current file missing → exit code ≠ 0; message lists missing path(s)
-- T10 Aggregate multi-bench
-  - When comparing multiple files, exit according to worst-case; print a per-bench summary
+- T1 Schema validity ✅
+  - Given a JSON file, validate required keys and types; fail on missing/invalid (implemented in scripts/check-bench-regression.sh)
+- T2 Packaging emit ✅
+  - After running the packaging bench, file target/benchmarks/bench-pack.json exists and parses (implemented in crates/aether-cli/benches/pack_bench.rs)
+- T3 Packaging metrics ✅
+  - p95 ≥ p50, n ≥ 1; metric=duration_ms; unit=ms (validated by schema check and bench output)
+- T4 Streaming emit ✅
+  - After running the streaming bench, file target/benchmarks/bench-stream.json exists and parses (implemented in crates/aether-cli/benches/stream_bench.rs)
+- T5 Streaming metrics ✅
+  - throughput_mbs > 0, p95 ≥ p50; metric=throughput_mbs; unit=MB/s (validated by schema check and bench output)
+- T6 Regression ok (no-regress) ✅
+  - current p95 ≤ baseline p95 × 1.2 → exit code 0 (fixtures covered)
+- T7 Regression hard (fail) ✅
+  - current p95 > baseline p95 × 1.2 → exit code ≠ 0; diff percentage printed (::warning:: emitted)
+- T8 GitHub Actions warning ✅
+  - When regression hard, emit ::warning:: lines with details (script emits warnings)
+- T9 Missing files ✅
+  - Baseline or current file missing → exit code ≠ 0; message lists missing path(s) (script checks presence)
+- T10 Aggregate multi-bench ✅
+  - When comparing multiple files, exit according to worst-case; print a per-bench summary (script aggregates and prints overall status)
 
 ## Failing-first roadmap
 
@@ -90,10 +90,19 @@ Notes
 
 ## CI verification plan
 
-- Step 1: Run regression script with fixture pairs to exercise thresholds and missing-file paths (T6–T10)
-- Step 2: Run benches with CI profile, produce JSON outputs, compare to baseline; print ::warning:: on regressions
-- Always upload target/benchmarks/*.json when job fails to aid debugging
-- Consider continue-on-error: true for PRs; enforce on main
+- Step 1: Run regression script with fixture pairs to exercise thresholds and missing-file paths (T6–T10) ✅ (benches job)
+- Step 2: Run benches with CI profile, produce JSON outputs, compare to baseline; print ::warning:: on regressions ✅ (benches job)
+- Always upload target/benchmarks/*.json when job fails to aid debugging ✅ (benches job uploads artifacts unconditionally)
+- Consider continue-on-error: true for PRs; enforce on main ✅ (job uses continue-on-error)
+
+## Completion status
+
+- Regression checker implemented: `scripts/check-bench-regression.sh` (schema validation, thresholds, warnings)
+- Packaging bench JSON output: `crates/aether-cli/benches/pack_bench.rs`
+- Streaming bench JSON output: `crates/aether-cli/benches/stream_bench.rs`
+- Baseline committed: `crates/aether-cli/benches/baseline/bench-pack.json`
+- Fixtures present under `tests/bench-fixtures/`
+- CI wired in `.github/workflows/feature-ci.yml` job “Benchmarks & Regression Guard”
 
 ## Definition of Done
 

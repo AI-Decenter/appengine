@@ -31,12 +31,38 @@ extract_str() {
   grep -oE '"'"$key"'"[[:space:]]*:[[:space:]]*"[^"]*"' "$file" | head -n1 | sed -E 's/.*:[[:space:]]*"(.*)"/\1/' || true
 }
 
+validate_json_schema() {
+  # Validate required keys and value types: bench_id, metric, unit (string); p50,p95 (number); n (integer >=1); timestamp (string)
+  local file="$1"; local ok=1
+  local bid metric unit p50 p95 n ts
+  bid=$(extract_str bench_id "$file"); metric=$(extract_str metric "$file"); unit=$(extract_str unit "$file");
+  p50=$(extract_num p50 "$file"); p95=$(extract_num p95 "$file"); n=$(grep -oE '"n"[[:space:]]*:[[:space:]]*[0-9]+' "$file" | head -n1 | sed -E 's/.*:[[:space:]]*//');
+  ts=$(extract_str timestamp "$file")
+  if [[ -z "$bid" || -z "$metric" || -z "$unit" || -z "$p50" || -z "$p95" || -z "$n" || -z "$ts" ]]; then ok=0; fi
+  if (( ${n:-0} < 1 )); then ok=0; fi
+  # p95 >= p50 check (basic sanity)
+  ge=$(awk -v a="$p95" -v b="$p50" 'BEGIN{print (a+0>=b+0)?1:0}')
+  if (( ge != 1 )); then ok=0; fi
+  return $(( ok==1 ? 0 : 1 ))
+}
+
 worst=0
 declare -i failures=0
 
 pair_index=0
 while (( $# >= 2 )); do
   base="$1"; cur="$2"; shift 2; ((pair_index++))
+  # Schema validation first
+  if ! validate_json_schema "$base"; then
+    echo "[schema] Invalid baseline JSON: $base" >&2
+    failures+=1
+    continue
+  fi
+  if ! validate_json_schema "$cur"; then
+    echo "[schema] Invalid current JSON: $cur" >&2
+    failures+=1
+    continue
+  fi
   bench_id_b=$(extract_str bench_id "$base")
   bench_id_c=$(extract_str bench_id "$cur")
   bench_id=${bench_id_c:-$bench_id_b}
