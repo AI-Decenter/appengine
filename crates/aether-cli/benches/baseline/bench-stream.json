@@ -1,0 +1,10 @@
+{
+  "bench_id": "streaming",
+  "metric": "throughput_mbs",
+  "unit": "MB/s",
+  "p50": 2253.881747840218,
+  "p95": 3563.1982198261694,
+  "n": 20,
+  "timestamp": "2025-10-11T04:17:20Z",
+  "notes": "Committed baseline from CI/local run: mock server streaming throughput (8MiB payload, 128KiB chunks)"
+}

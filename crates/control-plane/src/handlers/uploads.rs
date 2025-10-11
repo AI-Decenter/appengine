@@ -116,6 +116,11 @@ static UPLOAD_SEMAPHORE: once_cell::sync::Lazy<tokio::sync::Semaphore> = once_ce
     let max = std::env::var("AETHER_MAX_CONCURRENT_UPLOADS").ok().and_then(|v| v.parse::<usize>().ok()).filter(|v| *v>0).unwrap_or(32);
     tokio::sync::Semaphore::new(max)
 });
+// Fair semaphore for control-plane DB-bound endpoints to avoid bursty pool exhaustion in tests
+static CONTROL_SEMAPHORE: once_cell::sync::Lazy<tokio::sync::Semaphore> = once_cell::sync::Lazy::new(|| {
+    let max = std::env::var("AETHER_MAX_CONCURRENT_CONTROL").ok().and_then(|v| v.parse::<usize>().ok()).filter(|v| *v>0).unwrap_or(64);
+    tokio::sync::Semaphore::new(max)
+});
 
 #[derive(Deserialize)]
 pub struct UploadForm { pub app_name: String }
@@ -139,6 +144,7 @@ pub struct PresignResponse { pub upload_url: String, pub storage_key: String, pu
     description="Phase 1 of two-phase upload. Creates a pending artifact row (idempotent by digest) and returns a presigned PUT URL. If the artifact already exists (status=stored) an empty method NONE response is returned."
 )]
 pub async fn presign_artifact(State(state): State<AppState>, Json(req): Json<PresignRequest>) -> impl IntoResponse {
+    let _ctrl = CONTROL_SEMAPHORE.acquire().await.expect("control semaphore");
     PRESIGN_REQUESTS.inc();
     if req.app_name.trim().is_empty() { return ApiError::bad_request("app_name required").into_response(); }
     if req.digest.len()!=64 || !req.digest.chars().all(|c| c.is_ascii_hexdigit()) { return ApiError::new(StatusCode::BAD_REQUEST, "invalid_digest", "digest must be 64 hex").into_response(); }
@@ -202,6 +208,7 @@ pub struct CompleteResponse { pub artifact_id: String, pub digest: String, pub d
     description="Phase 2 of two-phase upload. Verifies remote object integrity (size & optional digest), enforces quotas & retention, and finalizes artifact metadata."
 )]
 pub async fn complete_artifact(State(state): State<AppState>, headers: HeaderMap, Json(req): Json<CompleteRequest>) -> impl IntoResponse {
+    let _ctrl = CONTROL_SEMAPHORE.acquire().await.expect("control semaphore");
     let start = std::time::Instant::now();
     // Basic validation
     if req.app_name.trim().is_empty() { return ApiError::bad_request("app_name required").into_response(); }
@@ -556,16 +563,16 @@ pub struct UploadResponse { pub artifact_url: String, pub digest: String, pub du
 /// HEAD existence check for artifact by digest
 pub async fn head_artifact(State(state): State<AppState>, Path(digest): Path<String>) -> impl IntoResponse {
     if digest.len()!=64 || !digest.chars().all(|c| c.is_ascii_hexdigit()) { return StatusCode::BAD_REQUEST; }
-    let exists = sqlx::query_scalar::<_, i64>("SELECT 1::BIGINT FROM artifacts WHERE digest=$1 AND status='stored'")
+    let exists = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM artifacts WHERE digest=$1 AND status='stored'")
         .bind(&digest)
-        .fetch_optional(&state.db).await.ok().flatten().is_some();
+        .fetch_one(&state.db).await.unwrap_or(0) > 0;
     if exists { StatusCode::OK } else { StatusCode::NOT_FOUND }
 }
 
 #[utoipa::path(get, path="/artifacts/{digest}/meta", params(("digest"=String, description="Artifact digest")), responses((status=200, body=Artifact),(status=404)), tag="aether")]
 pub async fn artifact_meta(State(state): State<AppState>, Path(digest): Path<String>) -> impl IntoResponse {
     if digest.len()!=64 || !digest.chars().all(|c| c.is_ascii_hexdigit()) { return StatusCode::BAD_REQUEST.into_response(); }
-    match sqlx::query_as::<_, Artifact>("SELECT id, app_id, digest, size_bytes, signature, sbom_url, manifest_url, verified, storage_key, status, created_at, completed_at, idempotency_key, multipart_upload_id FROM artifacts WHERE digest=$1")
+    match sqlx::query_as::<_, Artifact>("SELECT id, app_id, digest, size_bytes, signature, sbom_url, manifest_url, verified, storage_key, status, created_at, completed_at, idempotency_key, multipart_upload_id, provenance_present, manifest_digest, sbom_manifest_digest, sbom_validated FROM artifacts WHERE digest=$1")
         .bind(&digest)
         .fetch_optional(&state.db).await {
         Ok(Some(a)) => Json(a).into_response(),
@@ -589,9 +596,9 @@ async fn enforce_quota(conn: &mut PoolConnection<sqlx::Postgres>, app_id: Uuid, 
     let max_count = std::env::var("AETHER_MAX_ARTIFACTS_PER_APP").ok().and_then(|v| v.parse::<i64>().ok()).filter(|v| *v>0);
     let max_bytes = std::env::var("AETHER_MAX_TOTAL_BYTES_PER_APP").ok().and_then(|v| v.parse::<i64>().ok()).filter(|v| *v>0);
     if max_count.is_none() && max_bytes.is_none() { return Ok(()); }
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM artifacts WHERE app_id=$1 AND status!='pending'")
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM artifacts WHERE app_id=$1 AND status='stored'")
         .bind(app_id).fetch_one(pg(conn)).await.unwrap_or(0);
-    let used_bytes: i64 = sqlx::query_scalar("SELECT COALESCE(SUM(size_bytes),0) FROM artifacts WHERE app_id=$1 AND status!='pending'")
+    let used_bytes: i64 = sqlx::query_scalar("SELECT COALESCE(SUM(size_bytes),0) FROM artifacts WHERE app_id=$1 AND status='stored'")
         .bind(app_id).fetch_one(pg(conn)).await.unwrap_or(0);
     if let Some(mc)=max_count { if count >= mc { QUOTA_EXCEEDED_TOTAL.inc(); return Err(ApiError::new(StatusCode::FORBIDDEN, "quota_exceeded", format!("artifact count quota {} reached", mc))); } }
     if let Some(mb)=max_bytes { if used_bytes + incoming_size > mb { QUOTA_EXCEEDED_TOTAL.inc(); return Err(ApiError::new(StatusCode::FORBIDDEN, "quota_exceeded", format!("size quota {} exceeded ({} + {})", mb, used_bytes, incoming_size))); } }
@@ -605,13 +612,19 @@ async fn retention_gc_if_needed(conn: &mut PoolConnection<sqlx::Postgres>, app_i
     if retain == 0 { return Ok(()); }
     // Delete surplus (skip newest retain)
     let obsolete: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM artifacts WHERE app_id=$1 AND status='stored' ORDER BY created_at DESC OFFSET $2")
+        "SELECT id FROM artifacts WHERE app_id=$1 AND status='stored' ORDER BY completed_at DESC, created_at DESC, id DESC OFFSET $2")
         .bind(app)
         .bind(retain)
     .fetch_all(pg(conn)).await.unwrap_or_default();
     if !obsolete.is_empty() {
         for id in &obsolete { insert_event(conn, *id, "retention_delete").await.ok(); }
-    let _ = sqlx::query("DELETE FROM artifacts WHERE id = ANY($1)").bind(&obsolete).execute(pg(conn)).await;
+        // Remove dependent events first to avoid FK constraints blocking delete
+        let _ = sqlx::query("DELETE FROM artifact_events WHERE artifact_id = ANY($1)")
+            .bind(&obsolete)
+            .execute(pg(conn)).await;
+        let _ = sqlx::query("DELETE FROM artifacts WHERE id = ANY($1)")
+            .bind(&obsolete)
+            .execute(pg(conn)).await;
     }
     Ok(())
 }
@@ -760,7 +773,7 @@ pub async fn multipart_complete(State(state): State<AppState>, Json(req): Json<M
 )]
 pub async fn list_artifacts(State(state): State<AppState>) -> impl IntoResponse {
     // Select columns in the exact order of the Artifact struct definition.
-    let rows = sqlx::query_as::<_, Artifact>("SELECT id, app_id, digest, size_bytes, signature, sbom_url, manifest_url, verified, storage_key, status, created_at, completed_at, idempotency_key, multipart_upload_id FROM artifacts ORDER BY created_at DESC LIMIT 200")
+    let rows = sqlx::query_as::<_, Artifact>("SELECT id, app_id, digest, size_bytes, signature, sbom_url, manifest_url, verified, storage_key, status, created_at, completed_at, idempotency_key, multipart_upload_id, provenance_present, manifest_digest, sbom_manifest_digest, sbom_validated FROM artifacts ORDER BY created_at DESC, id DESC LIMIT 200")
         .fetch_all(&state.db).await
         .unwrap_or_default();
     Json(rows)

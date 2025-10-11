@@ -71,6 +71,8 @@ pub async fn mark_running(pool: &Pool<Postgres>, id: uuid::Uuid) {
         let secs = (chrono::Utc::now() - created_at).num_seconds() as f64;
     crate::telemetry::DEPLOYMENT_TIME_TO_RUNNING.observe(secs);
     }
+    // Refresh running deployments gauge
+    if let Ok(count) = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM deployments WHERE status='running'").fetch_one(pool).await { crate::telemetry::RUNNING_DEPLOYMENTS.set(count); }
 }
 
 pub async fn mark_failed(pool: &Pool<Postgres>, id: uuid::Uuid, reason: &str) {
@@ -84,6 +86,8 @@ pub async fn mark_failed(pool: &Pool<Postgres>, id: uuid::Uuid, reason: &str) {
         .execute(pool).await;
     // Metrics: increment failed
     crate::telemetry::DEPLOYMENT_STATUS.with_label_values(&["failed"]).inc();
+    // Refresh running deployments gauge (in case a running deployment failed)
+    if let Ok(count) = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM deployments WHERE status='running'").fetch_one(pool).await { crate::telemetry::RUNNING_DEPLOYMENTS.set(count); }
 }
 
 /// GC failed deployments that are older than ttl_secs and superseded by a newer running deployment for the same app.

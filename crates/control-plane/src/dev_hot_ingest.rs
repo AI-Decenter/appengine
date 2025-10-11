@@ -1,4 +1,4 @@
-use crate::telemetry::{DEV_HOT_REFRESH_TOTAL, DEV_HOT_REFRESH_FAILURE_TOTAL, DEV_HOT_REFRESH_LATENCY};
+use crate::telemetry::{DEV_HOT_REFRESH_TOTAL, DEV_HOT_REFRESH_FAILURE_TOTAL, DEV_HOT_REFRESH_LATENCY, DEV_HOT_REFRESH_CONSEC_FAIL, DEV_HOT_SIGNATURE_FAIL_TOTAL, build_commit};
 use anyhow::Result;
 use regex::Regex;
 use std::time::Duration;
@@ -26,7 +26,13 @@ pub async fn spawn_dev_hot_log_ingestion() -> Result<()> {
 
 async fn run_ingest_loop(client: Client) -> Result<()> {
     let namespace = std::env::var("AETHER_NAMESPACE").unwrap_or_else(|_| "default".to_string());
-    let pods: Api<Pod> = Api::namespaced(client.clone(), &namespace);
+    let multi = std::env::var("AETHER_DEV_HOT_MULTI_NS").unwrap_or_default() == "1";
+    let namespaces: Vec<String> = if multi {
+        // If multi-namespace mode, list namespaces via API; fall back to single on error
+        if let Ok(n_api) = kube::Api::<k8s_openapi::api::core::v1::Namespace>::all(client.clone()).list(&Default::default()).await {
+            n_api.items.into_iter().filter_map(|n| n.metadata.name).collect()
+        } else { vec![namespace.clone()] }
+    } else { vec![namespace.clone()] };
     use std::collections::{HashMap, HashSet};
     use rustc_hash::FxHasher;
     use std::hash::Hasher;
@@ -35,6 +41,8 @@ async fn run_ingest_loop(client: Client) -> Result<()> {
     let mut err_attempt: u32 = 0;
     info!(namespace, poll_secs, "dev_hot_ingest_loop_started");
     loop {
+        for ns in &namespaces {
+            let pods: Api<Pod> = Api::namespaced(client.clone(), ns);
         match pods.list(&ListParams::default()).await {
             Ok(list) => {
                 err_attempt = 0; // reset on success
@@ -70,24 +78,42 @@ async fn run_ingest_loop(client: Client) -> Result<()> {
                 err_attempt = err_attempt.saturating_add(1);
                 warn!(attempt=err_attempt, error=%e, "pod_list_failed_backing_off");
                 backoff_retry(err_attempt, Duration::from_millis(500), Duration::from_secs(5)).await;
-                continue; // skip normal poll sleep (already backed off)
+                continue; // skip to next ns or cycle
             }
+        }
         }
         sleep(Duration::from_secs(poll_secs)).await;
     }
 }
 
 fn parse_and_record(_pod: &str, line: &str) {
+    // Track consecutive failures per app in static map (simple interior mutability)
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    static CONSEC: once_cell::sync::Lazy<Mutex<HashMap<String,u32>>> = once_cell::sync::Lazy::new(|| Mutex::new(HashMap::new()));
     if let Some(caps) = RE_OK.with(|r| r.captures(line)) { // success
         let app = caps.get(1).unwrap().as_str();
         let ms: f64 = caps.get(3).unwrap().as_str().parse::<f64>().unwrap_or(0.0);
-        DEV_HOT_REFRESH_TOTAL.with_label_values(&[app]).inc();
-        DEV_HOT_REFRESH_LATENCY.with_label_values(&[app]).observe(ms / 1000.0);
+    let commit = build_commit();
+    DEV_HOT_REFRESH_TOTAL.with_label_values(&[app, commit]).inc();
+    DEV_HOT_REFRESH_LATENCY.with_label_values(&[app, commit]).observe(ms / 1000.0);
+        if let Ok(mut m) = CONSEC.lock() { m.insert(app.to_string(), 0); }
+        DEV_HOT_REFRESH_CONSEC_FAIL.set(total_consecutive_failures(&CONSEC));
     } else if let Some(caps) = RE_FAIL.with(|r| r.captures(line)) {
         let app = caps.get(1).unwrap().as_str();
         let reason = caps.get(2).unwrap().as_str();
-        DEV_HOT_REFRESH_FAILURE_TOTAL.with_label_values(&[app, reason]).inc();
+    let commit = build_commit();
+    DEV_HOT_REFRESH_FAILURE_TOTAL.with_label_values(&[app, reason, commit]).inc();
+        if reason == "signature" { DEV_HOT_SIGNATURE_FAIL_TOTAL.with_label_values(&[app, commit]).inc(); }
+        if let Ok(mut m) = CONSEC.lock() {
+            let v = m.entry(app.to_string()).or_insert(0); *v = v.saturating_add(1);
+        }
+        DEV_HOT_REFRESH_CONSEC_FAIL.set(total_consecutive_failures(&CONSEC));
     }
+}
+
+fn total_consecutive_failures(map: &once_cell::sync::Lazy<std::sync::Mutex<std::collections::HashMap<String,u32>>>) -> i64 {
+    if let Ok(m) = map.lock() { m.values().sum::<u32>() as i64 } else { 0 }
 }
 
 thread_local! {

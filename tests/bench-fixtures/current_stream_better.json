@@ -1,0 +1,10 @@
+{
+  "bench_id": "streaming",
+  "metric": "throughput_mbs",
+  "unit": "MB/s",
+  "p50": 85.0,
+  "p95": 88.0,
+  "n": 30,
+  "timestamp": "2025-01-01T00:00:00Z",
+  "notes": "Improved streaming throughput"
+}

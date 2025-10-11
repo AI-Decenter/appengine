@@ -1,0 +1,13 @@
+{
+  "bomFormat": "CycloneDX",
+  "components": [
+    {
+      "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "type": "container"
+    }
+  ],
+  "metadata": {
+    "backfill": true
+  },
+  "specVersion": "1.5"
+}

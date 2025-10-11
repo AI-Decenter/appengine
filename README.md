@@ -1,3 +1,50 @@
+## Benchmarks (Performance Suite)
+
+This repo includes a small performance suite to guard against regressions.
+
+What we measure
+- Packaging (duration in ms)
+- Streaming upload (throughput in MB/s via a local mock server)
+
+Outputs
+- `crates/aether-cli/target/benchmarks/bench-pack.json`
+- `crates/aether-cli/target/benchmarks/bench-stream.json`
+
+Baselines (committed)
+- Packaging: `crates/aether-cli/benches/baseline/bench-pack.json`
+- Streaming: `crates/aether-cli/benches/baseline/bench-stream.json`
+
+Regression policy
+- CI emits warnings and exits non-zero when p95 degrades by > 20% vs baseline.
+
+Run locally
+```bash
+cd appengine
+
+# Optional determinism knobs
+export RAYON_NUM_THREADS=2
+export RUST_LOG=off
+
+# Run benches
+cargo bench -p aether-cli --bench pack_bench --bench stream_bench --quiet
+
+# Compare to baselines
+bash scripts/check-bench-regression.sh \
+	crates/aether-cli/benches/baseline/bench-pack.json \
+	crates/aether-cli/target/benchmarks/bench-pack.json
+bash scripts/check-bench-regression.sh \
+	crates/aether-cli/benches/baseline/bench-stream.json \
+	crates/aether-cli/target/benchmarks/bench-stream.json
+```
+
+Update baselines
+- After stabilizing on main, copy new JSON to the relevant file under `crates/aether-cli/benches/baseline/` and commit in a PR dedicated to baseline updates.
+- Keep inputs fixed (payload size, chunk size, warm-up/sample counts) to reduce noise.
+
+Troubleshooting
+- If JSON files are missing, ensure the benches ran and that you’re looking under the crate-local path.
+- For noisy results on laptops/VMs, pin CPU, close background workloads, and increase measurement time locally.
+
 # AetherEngine (MVP v1.0)
 
 ![CI (Main)](https://github.com/askerNQK/appengine/actions/workflows/ci.yml/badge.svg)
@@ -398,6 +445,60 @@ Detailed procedures are specified in `DEVELOPMENT.md`. A provisioning and verifi
 Quick Start:
 1. Ensure Linux host with Docker (and optionally Snap if using MicroK8s).
 2. Option A (script): `./dev.sh bootstrap`
+
+---
+
+## 11. Testing (Control Plane)
+
+Fast, reliable tests depend on sane DB pool and background settings. The harness in `crates/control-plane/src/test_support.rs` provides defaults that work well locally and in CI.
+
+Key environment flags (defaults in tests):
+
+- AETHER_DISABLE_BACKGROUND=1 – disables background loops (metrics refreshers, GC timers)
+- AETHER_DISABLE_WATCH=1 – disables k8s watch tasks in tests
+- AETHER_STORAGE_MODE=mock – uses a mock storage backend (no network)
+- AETHER_FAST_TEST=1 – skips heavy external validations where supported
+- AETHER_MAX_CONCURRENT_CONTROL=4 – limits DB-bound handler concurrency
+- AETHER_TEST_MAX_CONNS=8 – Postgres pool max connections for tests
+
+Optional:
+
+- DATABASE_URL – Postgres connection string (preferred when Docker is not available)
+- AETHER_FORCE_TESTCONTAINERS=1 – use testcontainers-backed Postgres for isolation
+
+Recommended setups:
+
+1) Local Postgres (no Docker):
+
+```bash
+export DATABASE_URL=postgres://user:pass@localhost:5432/aether_test
+cargo test -p control-plane --tests -q
+```
+
+Optionally increase pool size slightly on fast machines:
+
+```bash
+AETHER_TEST_MAX_CONNS=12 cargo test -p control-plane --tests -q
+```
+
+2) Testcontainers (requires Docker):
+
+```bash
+AETHER_FORCE_TESTCONTAINERS=1 cargo test -p control-plane --tests -q
+```
+
+Run focused suites:
+
+```bash
+cargo test -p control-plane --test artifacts -q
+cargo test -p control-plane --test upload_integrity -q
+```
+
+Notes:
+
+- The test harness creates helpful indexes at startup to keep queries fast.
+- Connection/lock timeouts are short to fail fast rather than hang; if your DB is slow, raise `AETHER_TEST_DB_ACQUIRE_TIMEOUT_SECS`.
+- Background tasks are disabled in tests to avoid pool starvation.
 
 ### 10.1 Test Database Strategy (PostgreSQL)
 
