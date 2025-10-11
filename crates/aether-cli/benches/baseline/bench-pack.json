@@ -1,0 +1,10 @@
+{
+  "bench_id": "packaging",
+  "metric": "duration_ms",
+  "unit": "ms",
+  "p50": 0.50,
+  "p95": 0.60,
+  "n": 20,
+  "timestamp": "2025-01-01T00:00:00Z",
+  "notes": "Committed baseline placeholder for packaging (ms). Update with real baseline on main."
+}

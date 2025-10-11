@@ -43,6 +43,10 @@ humantime = "2"
 name = "pack_bench"
 harness = false
 
+[[bench]]
+name = "stream_bench"
+harness = false
+
 [dev-dependencies]
 criterion = { workspace = true }
 assert_cmd = "2"
@@ -50,3 +54,4 @@ tempfile = "3"
 proptest = "1"
 axum = { workspace = true }
 rand = "0.8"
+chrono = { workspace = true }
