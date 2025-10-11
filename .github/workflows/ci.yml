@@ -130,7 +130,7 @@ jobs:
           # Use per-test DB pools to avoid runtime shutdown issues
           AETHER_TEST_SHARED_POOL: '0'
         run: |
-          cargo test --workspace --all-features -- --nocapture
+          cargo test --workspace --all-features -- --nocapture --test-threads=4
 
       - name: Clippy (strict)
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings

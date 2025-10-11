@@ -126,11 +126,10 @@ async fn build_test_pool(shared: bool) -> Pool<Postgres> {
     let acquire_secs = std::env::var("AETHER_TEST_DB_ACQUIRE_TIMEOUT_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(default_timeout);
     opts = opts
         .max_connections(cap)
-    .min_connections(2)
         .test_before_acquire(true)
         .acquire_timeout(std::time::Duration::from_secs(acquire_secs))
-        .max_lifetime(std::time::Duration::from_secs(300))
-        .idle_timeout(std::time::Duration::from_secs(30))
+        .max_lifetime(std::time::Duration::from_secs(120))
+        .idle_timeout(std::time::Duration::from_secs(15))
         .after_connect(|conn, _meta| Box::pin(async move {
             // Prevent long-hanging queries under lock contention
                 let _ = sqlx::query("SET statement_timeout = 12000").execute(&mut *conn).await; // 12s
@@ -145,15 +144,15 @@ async fn build_test_pool(shared: bool) -> Pool<Postgres> {
     } else {
         eprintln!("Using per-test pool (url={})", sanitize_url(&final_url));
     }
-    if shared {
-        use tokio::sync::OnceCell;
-        static MIGRATIONS_APPLIED: OnceCell<()> = OnceCell::const_new();
-        MIGRATIONS_APPLIED.get_or_init(|| async {
+    // Apply migrations once per test process to avoid repeated, slow runs across tests.
+    // This is safe because our testcontainers Postgres is shared via OnceCell and CI uses a single external DB.
+    use tokio::sync::OnceCell;
+    static MIGRATIONS_APPLIED: OnceCell<()> = OnceCell::const_new();
+    MIGRATIONS_APPLIED
+        .get_or_init(|| async {
             sqlx::migrate!().run(&pool).await.expect("migrations");
-        }).await;
-    } else {
-        sqlx::migrate!().run(&pool).await.expect("migrations");
-    }
+        })
+        .await;
     pool
 }
 /// Normalize a postgres connection URL by injecting a password from POSTGRES_PASSWORD
@@ -255,11 +254,11 @@ async fn start_testcontainer_postgres() -> anyhow::Result<String> {
     let base_url = format!("postgres://aether:postgres@{}:{}/", host, port);
     // Poll for readiness
     let admin_url = format!("{}postgres", base_url);
-    for attempt in 0..60u32 { // up to ~15s (60 * 250ms)
+    for attempt in 0..120u32 { // up to ~30s (120 * 250ms)
         match sqlx::postgres::PgConnection::connect(&admin_url).await {
             Ok(mut c) => { let _ = sqlx::query("SELECT 1").execute(&mut c).await; break; }
             Err(e) => {
-                if attempt == 59 { return Err(anyhow::anyhow!("postgres testcontainer not ready after retries: {e}")); }
+                if attempt == 119 { return Err(anyhow::anyhow!("postgres testcontainer not ready after retries: {e}")); }
                 tokio::time::sleep(std::time::Duration::from_millis(250)).await;
             }
         }

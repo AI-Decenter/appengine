@@ -135,7 +135,7 @@ jobs:
           AETHER_API_TOKENS: t_admin:admin:alice,t_reader:reader:bob
           # Use per-test DB pools to avoid runtime shutdown issues
           AETHER_TEST_SHARED_POOL: '0'
-        run: cargo test --workspace --all-features -- --nocapture
+        run: cargo test --workspace --all-features -- --nocapture --test-threads=4
       - name: Focused exit code tests
         run: cargo test -p aether-cli --test exit_codes -- --nocapture
       - name: Build release aether-cli
@@ -274,7 +274,7 @@ jobs:
           AETHER_API_TOKENS: t_admin:admin:alice,t_reader:reader:bob
           # Use per-test DB pools to avoid runtime shutdown issues
           AETHER_TEST_SHARED_POOL: '0'
-        run: cargo test --workspace --all-features -- --nocapture
+        run: cargo test --workspace --all-features -- --nocapture --test-threads=4
       - name: Build release aether-cli
         run: cargo build -p aether-cli --release
       - name: Upload aether-cli binary artifact
