@@ -59,7 +59,7 @@
 	- Test parse ENV CSV, case không hợp lệ bị bỏ qua an toàn
 	- Test constant-time compare (khói) — bảo đảm logic không rò rỉ qua nhánh rõ ràng
 
-- [ ] Observability & logs
+- [x] Observability & logs
 	- Thêm field trace `user.role`, `user.name?`, `auth.result`
 	- Rate limit log 401 (chỉ cảnh báo, không spam)
 

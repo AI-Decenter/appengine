@@ -149,7 +149,17 @@ pub fn build_router(state: AppState) -> Router {
         let path_raw = req.uri().path().to_string();
         let norm_path = crate::telemetry::normalize_path(&path_raw);
         let start = std::time::Instant::now();
-        let span = tracing::info_span!("http.req", %method, path=%norm_path, raw_path=%path_raw, %trace_id, %request_id);
+        let span = tracing::info_span!(
+            "http.req",
+            %method,
+            path=%norm_path,
+            raw_path=%path_raw,
+            %trace_id,
+            %request_id,
+            user_role = tracing::field::Empty,
+            user_name = tracing::field::Empty,
+            auth_result = tracing::field::Empty
+        );
         let _enter = span.enter();
         let mut resp = next.run(req).await;
         let status = resp.status().as_u16();
