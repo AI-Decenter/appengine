@@ -28,10 +28,10 @@
 	- `scripts/check-bench-regression.sh` so sánh p95 với baseline; exit non‑zero khi >20%; in `::warning::`. Có kiểm tra schema cơ bản.
 - [x] CI wiring for benches
 	- Thêm job "Benchmarks & Regression Guard" trong `.github/workflows/feature-ci.yml`: chạy fixtures, chạy benches, so sánh, upload artifacts.
-- [ ] Docs: how to run/update
-	- README: thêm hướng dẫn chạy benches, vị trí JSON, cập nhật baseline, ngưỡng regression.
-- [ ] Stabilization guardrails
-	- Cố định input/warm-up, pin thread (`RAYON_NUM_THREADS=2`), note governor CPU (nếu self-hosted). Cần bổ sung docs và biến env trong job.
+- [x] Docs: how to run/update
+	- README: đã bổ sung mục "Benchmarks (Performance Suite)" với hướng dẫn chạy, vị trí JSON, cập nhật baseline, ngưỡng regression.
+- [x] Stabilization guardrails
+	- Đã pin `RAYON_NUM_THREADS=2` và `RUST_LOG=off` trong job CI benches; input/warm-up cố định trong benches. Có lưu ý thêm trong README.
 - [x] Deliver acceptance artifacts
 	- B1: baseline `bench-pack.json` đã commit. B2: script trả exit non‑zero khi vượt ngưỡng và CI cảnh báo.
 
