@@ -150,6 +150,61 @@ jobs:
           cargo sqlx prepare --workspace -- --all-targets
           git diff --name-only --exit-code sqlx-data.json || { echo 'sqlx-data.json not updated. Please commit.'; exit 1; }
 
+  benchmarks:
+    name: Benchmarks & Regression Guard
+    needs: lint
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: benches-${{ hashFiles('Cargo.lock') }}
+      - name: Verify regression script with fixtures (OK cases)
+        run: |
+          bash scripts/check-bench-regression.sh tests/bench-fixtures/baseline_pack.json tests/bench-fixtures/current_pack_better.json
+          bash scripts/check-bench-regression.sh tests/bench-fixtures/baseline_pack.json tests/bench-fixtures/current_pack_plus10.json
+          bash scripts/check-bench-regression.sh tests/bench-fixtures/baseline_stream.json tests/bench-fixtures/current_stream_better.json
+          bash scripts/check-bench-regression.sh tests/bench-fixtures/baseline_stream.json tests/bench-fixtures/current_stream_minus10.json
+      - name: Verify regression script with fixtures (expected failures)
+        run: |
+          set -e
+          if bash scripts/check-bench-regression.sh tests/bench-fixtures/baseline_pack.json tests/bench-fixtures/current_pack_plus25.json; then
+            echo "expected failure but passed (pack +25%)"; exit 1; else echo "expected failure: pack +25%"; fi
+          if bash scripts/check-bench-regression.sh tests/bench-fixtures/baseline_stream.json tests/bench-fixtures/current_stream_minus25.json; then
+            echo "expected failure but passed (stream -25%)"; exit 1; else echo "expected failure: stream -25%"; fi
+      - name: Run benches (aether-cli)
+        run: |
+          cargo bench -p aether-cli --bench pack_bench --bench stream_bench --quiet || true
+      - name: Compare bench outputs to baselines
+        run: |
+          # packaging vs committed baseline
+          bash scripts/check-bench-regression.sh \
+            crates/aether-cli/benches/baseline/bench-pack.json \
+            crates/aether-cli/target/benchmarks/bench-pack.json
+          # streaming vs fixture baseline (until committed baseline exists)
+          bash scripts/check-bench-regression.sh \
+            tests/bench-fixtures/baseline_stream.json \
+            crates/aether-cli/target/benchmarks/bench-stream.json
+      - name: Upload bench JSON artifacts (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-jsons
+          path: |
+            crates/aether-cli/target/benchmarks/*.json
+            target/criterion/**
+          if-no-files-found: warn
+
   test-macos:
     name: Tests (macOS)
     needs: lint
