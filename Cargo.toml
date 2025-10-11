@@ -32,8 +32,8 @@ tar = "0.4"
 axum = { version = "0.7", features = ["json", "macros", "multipart"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 criterion = { version = "0.5", features = ["html_reports"] }
-kube = { version = "0.92", features = ["runtime", "derive", "client"] }
-kube-runtime = "0.92"
+kube = { version = "0.94", default-features = false, features = ["runtime", "derive", "client"] }
+kube-runtime = "0.94"
 futures-util = "0.3"
 futures = "0.3"
 once_cell = "1"
