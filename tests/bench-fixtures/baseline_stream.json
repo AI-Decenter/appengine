@@ -2,8 +2,8 @@
   "bench_id": "streaming",
   "metric": "throughput_mbs",
   "unit": "MB/s",
-  "p50": 80.0,
-  "p95": 70.0,
+  "p50": 70.0,
+  "p95": 80.0,
   "n": 30,
   "timestamp": "2025-01-01T00:00:00Z",
   "notes": "Fixture baseline for streaming throughput"

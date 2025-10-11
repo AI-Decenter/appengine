@@ -2,7 +2,7 @@
   "bench_id": "streaming",
   "metric": "throughput_mbs",
   "unit": "MB/s",
-  "p50": 75.0,
+  "p50": 60.0,
   "p95": 63.0,
   "n": 30,
   "timestamp": "2025-01-01T00:00:00Z",
