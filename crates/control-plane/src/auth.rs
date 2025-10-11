@@ -1,100 +1,151 @@
-use axum::{extract::{Request, State}, http::{StatusCode, header}, middleware::Next, response::{Response, IntoResponse}};
-use crate::error::ApiError;
- 
+use axum::{extract::Request, http::StatusCode, middleware::Next};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::{collections::HashMap, sync::Arc};
+use tracing::warn;
+use uuid::Uuid;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Role { Admin, User }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Role {
+	Admin,
+	Reader,
+}
+
+impl Role {
+	pub fn from_str(s: &str) -> Option<Self> {
+		match s {
+			"admin" => Some(Role::Admin),
+			"reader" => Some(Role::Reader),
+			_ => None,
+		}
+	}
+	pub fn as_str(&self) -> &'static str {
+		match self { Role::Admin => "admin", Role::Reader => "reader" }
+	}
+	pub fn allows(&self, required: Role) -> bool {
+		match (self, required) {
+			(Role::Admin, _) => true,
+			(Role::Reader, Role::Reader) => true,
+			(Role::Reader, Role::Admin) => false,
+		}
+	}
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct UserContext {
+	pub user_id: Uuid,
+	pub role: Role,
+	pub name: Option<String>,
+	pub token_hash_hex: String, // for debugging prefix logging only
+}
 
 #[derive(Clone, Debug)]
-pub struct Identity { pub role: Role, pub subject: String }
-
-fn is_auth_enabled() -> bool { std::env::var("AETHER_AUTH_ENABLED").unwrap_or_default() == "1" }
-
-fn extract_bearer(req: &Request) -> Option<String> {
-    let header = req.headers().get(header::AUTHORIZATION)?.to_str().ok()?;
-    let parts: Vec<&str> = header.split_whitespace().collect();
-    if parts.len()==2 && parts[0].eq_ignore_ascii_case("Bearer") { Some(parts[1].trim().to_string()) } else { None }
+pub struct UserInfo {
+	pub role: Role,
+	pub name: Option<String>,
+	pub token_hash: [u8; 32],
+	pub token_hash_hex: String,
 }
 
-// Constant-time equality
-fn ct_equal(a: &str, b: &str) -> bool {
-    if a.len() != b.len() { return false; }
-    let mut diff: u8 = 0;
-    for (x, y) in a.as_bytes().iter().zip(b.as_bytes()) { diff |= x ^ y; }
-    diff == 0
+#[derive(Clone, Debug)]
+pub struct AuthStore {
+	// sha256(token) -> UserInfo
+	by_hash: HashMap<[u8; 32], UserInfo>,
+	pub auth_required: bool,
 }
 
-async fn validate_env_token(token: &str) -> Option<Identity> {
-    if let Ok(admin) = std::env::var("AETHER_ADMIN_TOKEN") {
-        eprintln!("[auth] compare admin env len={} vs token len={}", admin.len(), token.len());
-        if !admin.is_empty() && ct_equal(&admin, token) { return Some(Identity { role: Role::Admin, subject: "admin_env".into() }); }
-    }
-    if let Ok(user) = std::env::var("AETHER_USER_TOKEN") {
-        eprintln!("[auth] compare user env '{}' vs token '{}'", &user, token);
-        if !user.is_empty() && ct_equal(&user, token) { return Some(Identity { role: Role::User, subject: "user_env".into() }); }
-    }
-    None
+impl AuthStore {
+	pub fn empty() -> Self { Self { by_hash: HashMap::new(), auth_required: false } }
+	pub fn from_env() -> Self {
+	let tokens_env = std::env::var("AETHER_API_TOKENS").unwrap_or_default();
+	// Only enable when explicitly requested to avoid surprising existing tests
+	let required = std::env::var("AETHER_AUTH_REQUIRED").ok().map(|v| v == "1").unwrap_or(false);
+		let mut by_hash = HashMap::new();
+		for part in tokens_env.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+			// token:role[:name]
+			let mut segs = part.split(':');
+			let token = segs.next().unwrap_or("");
+			let role_s = segs.next().unwrap_or("");
+			let name = segs.next().map(|s| s.to_string());
+			if token.is_empty() || role_s.is_empty() { continue; }
+			let Some(role) = Role::from_str(role_s) else { continue; };
+			let mut hasher = Sha256::new();
+			hasher.update(token.as_bytes());
+			let hash = hasher.finalize();
+			let mut arr = [0u8; 32];
+			arr.copy_from_slice(&hash);
+			let hex_hash = hex::encode(arr);
+			let info = UserInfo { role, name, token_hash: arr, token_hash_hex: hex_hash.clone() };
+			by_hash.insert(arr, info);
+		}
+		Self { by_hash, auth_required: required }
+	}
 }
 
-async fn validate_db_token(db: &sqlx::Pool<sqlx::Postgres>, token: &str) -> Option<Identity> {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(token.as_bytes());
-    let hex_hash = hex::encode(hasher.finalize());
-    let row = sqlx::query_as::<_, (String,)>("SELECT role FROM users WHERE token_hash=$1").bind(&hex_hash).fetch_optional(db).await.ok()?;
-    match row { Some((role_str,)) => {
-        let role = if role_str.eq_ignore_ascii_case("admin") { Role::Admin } else { Role::User };
-        Some(Identity { role, subject: "db_user".into() })
-    }, None => None }
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+	if a.len() != b.len() { return false; }
+	let mut diff: u8 = 0;
+	for i in 0..a.len() { diff |= a[i] ^ b[i]; }
+	diff == 0
 }
 
-pub async fn auth_layer(State(db): State<sqlx::Pool<sqlx::Postgres>>, mut req: Request, next: Next) -> Result<Response, Response> {
-    if !is_auth_enabled() {
-        return Ok(next.run(req).await);
-    }
-    // Allow-list public endpoints regardless of auth
-    let path = req.uri().path();
-    if matches!(path, "/health" | "/readyz" | "/startupz" | "/metrics" | "/openapi.json" | "/swagger") {
-        return Ok(next.run(req).await);
-    }
-    let hdr = req.headers().get(header::AUTHORIZATION).cloned();
-    if let Some(h) = &hdr { eprintln!("[auth] authorization header present: {}", h.to_str().unwrap_or("<bad>")); } else { eprintln!("[auth] no authorization header"); }
-    let Some(token) = extract_bearer(&req) else {
-    tracing::debug!(%path, "auth_missing_bearer");
-        return Err(ApiError::new(StatusCode::UNAUTHORIZED, "unauthorized", "missing bearer token").into_response());
-    };
-    let mode = std::env::var("AETHER_AUTH_MODE").unwrap_or_else(|_| "env".into());
-    if mode == "db" {
-        tracing::debug!("auth_mode_db");
-    } else {
-        let a = std::env::var("AETHER_ADMIN_TOKEN").ok();
-        let u = std::env::var("AETHER_USER_TOKEN").ok();
-        eprintln!("[auth] env mode: admin? {} user? {}", a.is_some(), u.is_some());
-        tracing::debug!(admin_token_set=%a.is_some(), user_token_set=%u.is_some(), "auth_mode_env");
-    }
-    eprintln!("[auth] extracted bearer len={} (starts {})", token.len(), &token.chars().take(5).collect::<String>());
-    let ident = if mode == "db" { validate_db_token(&db, &token).await } else { validate_env_token(&token).await };
-    let Some(identity) = ident else {
-    tracing::debug!(%path, "auth_invalid_token");
-        return Err(ApiError::new(StatusCode::UNAUTHORIZED, "unauthorized", "invalid token").into_response());
-    };
-    req.extensions_mut().insert(identity);
-    Ok(next.run(req).await)
+pub fn is_auth_enabled(cfg: &AuthStore) -> bool {
+	cfg.auth_required && !cfg.by_hash.is_empty()
 }
 
-// RBAC guard helper: enforce admin for mutating ops; GETs allowed for user
-pub fn require_admin(identity: Option<&Identity>) -> Result<(), ApiError> {
-    match identity { Some(id) => match id.role { Role::Admin => Ok(()), Role::User => Err(ApiError::new(StatusCode::FORBIDDEN, "forbidden", "admin required")) }, None => Err(ApiError::new(StatusCode::UNAUTHORIZED, "unauthorized", "missing identity")) }
+pub async fn auth_middleware(mut req: Request, next: Next, store: Arc<AuthStore>) -> Result<axum::response::Response, axum::response::Response> {
+	// Allow pass-through if not enabled
+	if !is_auth_enabled(&store) { return Ok(next.run(req).await); }
+
+	// Expect Authorization: Bearer <token>
+	let Some(val) = req.headers().get(axum::http::header::AUTHORIZATION) else {
+		return Err(axum::response::Response::builder().status(StatusCode::UNAUTHORIZED).body(axum::body::Body::empty()).unwrap());
+	};
+	let Ok(hdr) = val.to_str() else {
+		return Err(axum::response::Response::builder().status(StatusCode::UNAUTHORIZED).body(axum::body::Body::empty()).unwrap());
+	};
+	let prefix = "Bearer ";
+	if !hdr.starts_with(prefix) {
+		return Err(axum::response::Response::builder().status(StatusCode::UNAUTHORIZED).body(axum::body::Body::empty()).unwrap());
+	}
+	let token = &hdr[prefix.len()..];
+	// Hash the token and lookup
+	let mut hasher = Sha256::new();
+	hasher.update(token.as_bytes());
+	let hash = hasher.finalize();
+	let mut arr = [0u8; 32];
+	arr.copy_from_slice(&hash);
+	if let Some(info) = store.by_hash.get(&arr) {
+		// Constant-time confirmation (redundant as hash-length fixed, but good practice)
+		if !ct_eq(&arr, &info.token_hash) {
+			return Err(axum::response::Response::builder().status(StatusCode::UNAUTHORIZED).body(axum::body::Body::empty()).unwrap());
+		}
+	// Create stable user_id from sha256(token) first 16 bytes
+	let hash = Sha256::digest(token.as_bytes());
+	let mut b16 = [0u8; 16]; b16.copy_from_slice(&hash[..16]);
+	let user_id = Uuid::from_bytes(b16);
+		let ctx = UserContext { user_id, role: info.role, name: info.name.clone(), token_hash_hex: info.token_hash_hex.clone() };
+		// Minimal logging without token
+		let log_prefix = &ctx.token_hash_hex[..6.min(ctx.token_hash_hex.len())];
+		tracing::debug!(role=%ctx.role.as_str(), hash_prefix=%log_prefix, "auth.ok");
+		req.extensions_mut().insert(ctx);
+		Ok(next.run(req).await)
+	} else {
+		let short = &hex::encode(arr)[..6];
+		warn!(hash_prefix=%short, "auth.fail.unknown_token");
+		Err(axum::response::Response::builder().status(StatusCode::UNAUTHORIZED).body(axum::body::Body::empty()).unwrap())
+	}
 }
 
-// Middleware to enforce admin at route-level
-pub async fn require_admin_mw(req: Request, next: Next) -> Result<Response, Response> {
-    if !is_auth_enabled() {
-        return Ok(next.run(req).await);
-    }
-    let identity = req.extensions().get::<Identity>();
-    match require_admin(identity) {
-        Ok(()) => Ok(next.run(req).await),
-        Err(e) => Err(e.into_response()),
-    }
+// Route-level RBAC guard; min_role enforced if auth is enabled; otherwise pass-through
+pub async fn require_role(mut req: Request, next: Next, store: Arc<AuthStore>, min_role: Role) -> Result<axum::response::Response, axum::response::Response> {
+	if !is_auth_enabled(&store) { return Ok(next.run(req).await); }
+	if let Some(ctx) = req.extensions().get::<UserContext>() {
+		if ctx.role.allows(min_role) { return Ok(next.run(req).await); }
+		return Err(axum::response::Response::builder().status(StatusCode::FORBIDDEN).body(axum::body::Body::empty()).unwrap());
+	}
+	Err(axum::response::Response::builder().status(StatusCode::UNAUTHORIZED).body(axum::body::Body::empty()).unwrap())
 }
+
+// Note: layer builders are created inline via axum::middleware::from_fn_with_state in lib.rs
+

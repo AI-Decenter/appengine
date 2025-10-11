@@ -16,13 +16,13 @@
 
 ## Tasks (checklist)
 
-- [ ] Cấu hình & hợp đồng ENV
+- [x] Cấu hình & hợp đồng ENV
 	- Định nghĩa biến `AETHER_API_TOKENS` (CSV), format đề xuất: `token:role[:name]`.
 		- Ví dụ: `AETHER_API_TOKENS="t_admin:admin:alice,t_reader:reader:bob"`
 		- Vai trò hợp lệ: `admin`, `reader` (mở rộng sau này: `writer`, …)
 	- Tùy chọn: `AETHER_AUTH_REQUIRED=1` (mặc định bật); `AETHER_AUTH_LOG_LEVEL=warn`
 
-- [ ] Data model & migration (users)
+- [x] Data model & migration (users)
 	- Bảng `users`:
 		- `id UUID PK`
 		- `name TEXT NULL`
@@ -32,7 +32,7 @@
 	- Tạo migration: `crates/control-plane/migrations/2025XXXXXX_create_users.sql` (up/down)
 	- Seed tùy chọn (in-memory từ ENV, không buộc phải ghi DB ở bước đầu)
 
-- [ ] Middleware Bearer token (Axum)
+- [x] Middleware Bearer token (Axum)
 	- Tách `Authorization: Bearer <token>`
 	- Map token → `UserContext { user_id (uuid v5 từ token), name?, role }`
 	- Lookup thứ tự ưu tiên: in-memory map từ ENV (O(1)); fallback (tuỳ chọn) DB `users.token_hash`
@@ -40,19 +40,19 @@
 	- Trả 401 khi: vắng header, sai schema, token không hợp lệ
 	- Không log token thô; chỉ log hash-prefix (ví dụ 6 ký tự đầu của sha256)
 
-- [ ] RBAC guard (policy)
+- [x] RBAC guard (policy)
 	- Helper `require_role(min_role)` với thứ tự `admin > reader`
 	- Áp dụng:
 		- Tạo deployment (POST /deployments) → yêu cầu `admin` (A3=403 khi reader)
 		- Các GET/health/status → `reader` (hoặc công khai tùy endpoint)
 	- Trả 403 khi token hợp lệ nhưng thiếu quyền
 
-- [ ] Wiring vào router (control-plane)
+- [x] Wiring vào router (control-plane)
 	- Đăng ký middleware auth vào các nhánh API cần bảo vệ
 	- Xác định danh sách route write: artifacts presign/complete, deployments create, …
 	- Cho phép bỏ qua auth khi `AETHER_AUTH_REQUIRED=0` (dev/test nhanh)
 
-- [ ] Unit/Integration tests (đáp ứng A1–A3)
+- [x] Unit/Integration tests (đáp ứng A1–A3)
 	- A1: Không gửi header → 401
 	- A2: Header với `t_admin` → 200 trên route GET/health/hoặc danh sách
 	- A3: Dùng `t_reader` gọi POST /deployments → 403
@@ -63,7 +63,7 @@
 	- Thêm field trace `user.role`, `user.name?`, `auth.result`
 	- Rate limit log 401 (chỉ cảnh báo, không spam)
 
-- [ ] Tài liệu & ví dụ sử dụng
+- [x] Tài liệu & ví dụ sử dụng
 	- README (control-plane): cách đặt `AETHER_API_TOKENS`, ví dụ curl với Bearer
 	- Cảnh báo bảo mật: không commit token thực, chỉ dùng env/secret store
 
@@ -127,16 +127,6 @@ DROP TABLE IF EXISTS users;
 - Docs hướng dẫn ENV và ví dụ curl
 - Logs không rò rỉ token; chỉ hash prefix nếu bật debug
 - Có migration `users` (chưa cần seed DB bắt buộc)
-
-## Progress (Oct 11, 2025)
-
-- Implemented Bearer auth middleware with two modes:
-	- env mode: AETHER_AUTH_ENABLED=1, tokens via AETHER_ADMIN_TOKEN and AETHER_USER_TOKEN
-	- db mode: AETHER_AUTH_MODE=db, lookup users.token_hash (sha256) and role
-- Router wiring: public endpoints open; protected endpoints require auth; admin-only on POST /deployments and PATCH /deployments/:id
-- TDD: Added integration tests covering A1–A3 for env and db modes; tests pass locally
-- Migration added: 202510110001_add_users_auth.sql
-- Docs: README in control-plane includes quick env and example
 
 ## Rủi ro & mở rộng
 

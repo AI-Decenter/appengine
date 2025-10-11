@@ -17,7 +17,7 @@ pub mod auth; // Auth & RBAC (Issue 10)
 // Re-export storage accessor to provide a stable import path even if the module path resolution behaves differently in some build contexts.
 pub use storage::get_storage;
 
-use axum::{Router, routing::{get, post, patch}};
+use axum::{Router, routing::{get, post}};
 use sqlx::{Pool, Postgres};
 use handlers::{health::health, apps::{list_apps, app_logs, create_app, app_deployments, add_public_key}, deployments::{create_deployment, list_deployments, get_deployment}, readiness::readiness, uploads::{upload_artifact, list_artifacts, head_artifact, presign_artifact, complete_artifact, multipart_init, multipart_presign_part, multipart_complete}};
 use utoipa::OpenApi;
@@ -163,45 +163,66 @@ pub fn build_router(state: AppState) -> Router {
         Ok(resp)
     }
     let trace_layer_mw = axum::middleware::from_fn(trace_layer);
-    // Auth layer (configured by env). Uses DB for DB mode and env tokens for env mode.
-    let auth_layer_mw = axum::middleware::from_fn_with_state(state.db.clone(), auth::auth_layer);
-    let admin_guard = axum::middleware::from_fn(auth::require_admin_mw);
-    // Public routes
+
+    // Optional auth and RBAC layers (activate only when AETHER_AUTH_REQUIRED=1)
+    let auth_store = std::sync::Arc::new(crate::auth::AuthStore::from_env());
+    let auth_store_for_auth = auth_store.clone();
+    let auth_layer = axum::middleware::from_fn_with_state(auth_store.clone(), move |req, next| {
+        let store = auth_store_for_auth.clone();
+        crate::auth::auth_middleware(req, next, store)
+    });
+    let auth_store_for_admin = auth_store.clone();
+    let admin_guard = axum::middleware::from_fn_with_state(auth_store.clone(), move |req, next| {
+        let store = auth_store_for_admin.clone();
+        crate::auth::require_role(req, next, store, crate::auth::Role::Admin)
+    });
+
+    // Public endpoints
     let public = Router::new()
         .route("/health", get(health))
         .route("/readyz", get(readiness))
         .route("/startupz", get(handlers::readiness::startupz))
-        .route("/metrics", get(metrics_handler))
-        .route("/openapi.json", get(move || async move { axum::Json(openapi.clone()) }))
-        .route("/swagger", get(swagger_ui));
-    // Protected routes
-    let protected = Router::new()
+        .route("/metrics", get(metrics_handler));
+
+    // Read endpoints (auth-only)
+    let reads = Router::new()
         .route("/deployments", get(list_deployments))
-        .route("/deployments", post(create_deployment).route_layer(admin_guard.clone()))
         .route("/deployments/:id", get(get_deployment))
-        .route("/deployments/:id", patch(handlers::deployments::update_deployment).route_layer(admin_guard.clone()))
-        .route("/artifacts", post(upload_artifact).get(list_artifacts))
+        .route("/artifacts", get(list_artifacts))
+        .route("/artifacts/:digest", axum::routing::head(head_artifact))
+        .route("/artifacts/:digest/meta", get(handlers::uploads::artifact_meta))
+        .route("/artifacts/:digest/sbom", get(handlers::artifacts::get_sbom))
+        .route("/artifacts/:digest/manifest", get(handlers::artifacts::get_manifest))
+        .route("/provenance", get(handlers::provenance::list_provenance))
+        .route("/provenance/:digest", get(handlers::provenance::get_provenance))
+        .route("/provenance/:digest/attestation", get(handlers::provenance::get_attestation))
+        .route("/provenance/keys", get(handlers::keys::list_keys))
+        .route("/apps", get(list_apps))
+        .route("/apps/:app_name/deployments", get(app_deployments))
+        .route("/apps/:app_name/logs", get(app_logs))
+        .layer(auth_layer.clone());
+
+    // Write endpoints (auth + admin)
+    let writes = Router::new()
+        .route("/deployments", post(create_deployment))
+        .route("/deployments/:id", axum::routing::patch(handlers::deployments::update_deployment))
+        .route("/artifacts", post(upload_artifact))
         .route("/artifacts/presign", post(presign_artifact))
         .route("/artifacts/complete", post(complete_artifact))
         .route("/artifacts/multipart/init", post(multipart_init))
         .route("/artifacts/multipart/presign-part", post(multipart_presign_part))
         .route("/artifacts/multipart/complete", post(multipart_complete))
-        .route("/artifacts/:digest", axum::routing::head(head_artifact))
-        .route("/artifacts/:digest/meta", get(handlers::uploads::artifact_meta))
-        .route("/artifacts/:digest/sbom", get(handlers::artifacts::get_sbom).post(handlers::artifacts::upload_sbom))
-        .route("/artifacts/:digest/manifest", get(handlers::artifacts::get_manifest).post(handlers::artifacts::upload_manifest))
-        .route("/provenance", get(handlers::provenance::list_provenance))
-        .route("/provenance/:digest", get(handlers::provenance::get_provenance))
-        .route("/provenance/:digest/attestation", get(handlers::provenance::get_attestation))
-        .route("/provenance/keys", get(handlers::keys::list_keys))
         .route("/apps", post(create_app))
-        .route("/apps", get(list_apps))
-        .route("/apps/:app_name/deployments", get(app_deployments))
-        .route("/apps/:app_name/logs", get(app_logs))
         .route("/apps/:app_name/public-keys", post(add_public_key))
-        .layer(auth_layer_mw);
-    public
-        .merge(protected)
+        .layer(admin_guard.clone())
+        .layer(auth_layer.clone());
+
+    Router::new()
+        .merge(public)
+        .merge(reads)
+        .merge(writes)
+        .route("/openapi.json", get(move || async move { axum::Json(openapi.clone()) }))
+        .route("/swagger", get(swagger_ui))
         .layer(trace_layer_mw)
         .with_state(state)
 }

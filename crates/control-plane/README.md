@@ -1,22 +1,18 @@
-# Control Plane
+# Control Plane Auth & RBAC
 
-## Auth & RBAC (Issue 10)
+Env configuration:
+- AETHER_API_TOKENS: CSV entries in form token:role[:name], roles: admin, reader
+- AETHER_AUTH_REQUIRED: 1 to enforce auth, 0/absent to disable (default disabled for backward-compat)
 
-The API supports optional Bearer token authentication with simple RBAC:
+Example:
+- export AETHER_API_TOKENS="t_admin:admin:alice,t_reader:reader:bob"
+- export AETHER_AUTH_REQUIRED=1
 
-- AETHER_AUTH_ENABLED=1 enables authentication
-- Modes:
-  - env (default): compare against AETHER_ADMIN_TOKEN and AETHER_USER_TOKEN
-  - db: compare SHA-256(token) against users.token_hash in the database, using role column (admin|user)
-- Public routes remain unauthenticated: /health, /readyz, /startupz, /metrics, /openapi.json, /swagger
-- Admin-only endpoints include POST /deployments and PATCH /deployments/:id
+Requests:
+- Reader GET deployments
+	curl -H "Authorization: Bearer t_reader" http://localhost:3000/deployments
+- Admin POST deployment
+	curl -H "Authorization: Bearer t_admin" -H 'content-type: application/json' -d '{"app_name":"demo","artifact_url":"file://foo"}' http://localhost:3000/deployments
 
-Example (env mode):
+Security note: Never commit real tokens; use environment/secret store. Tokens are hashed in-memory and only hash prefixes are logged at debug level.
 
-```
-export AETHER_AUTH_ENABLED=1
-export AETHER_ADMIN_TOKEN=admin_secret
-export AETHER_USER_TOKEN=user_secret
-```
-
-Tests cover env and db modes; set AETHER_DISABLE_K8S=1 in tests/dev to avoid contacting a real cluster.
