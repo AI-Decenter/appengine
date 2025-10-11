@@ -2,9 +2,9 @@
   "bench_id": "packaging",
   "metric": "duration_ms",
   "unit": "ms",
-  "p50": 0.50,
-  "p95": 0.60,
+  "p50": 0.95,
+  "p95": 1.20,
   "n": 20,
-  "timestamp": "2025-01-01T00:00:00Z",
-  "notes": "Committed baseline placeholder for packaging (ms). Update with real baseline on main."
+  "timestamp": "2025-10-11T00:00:00Z",
+  "notes": "Baseline aligned with CI measurements for packaging (100 files, 1KiB each)."
 }

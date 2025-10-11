@@ -24,6 +24,7 @@ async fn seed_app_and_artifact(pool: &sqlx::Pool<sqlx::Postgres>, app: &str, dig
 #[tokio::test]
 #[serial_test::serial]
 async fn dual_sign_with_explicit_active_keystore() {
+    std::env::set_var("AETHER_AUTH_ENABLED", "0");
     let k1 = gen_key_hex(); let k2 = gen_key_hex();
     std::env::set_var("AETHER_ATTESTATION_SK", &k1);
     std::env::set_var("AETHER_ATTESTATION_KEY_ID", "k1-active");
@@ -53,6 +54,7 @@ async fn dual_sign_with_explicit_active_keystore() {
 #[tokio::test]
 #[serial_test::serial]
 async fn no_signatures_when_all_retired() {
+    std::env::set_var("AETHER_AUTH_ENABLED", "0");
     let k1 = gen_key_hex(); let k2 = gen_key_hex();
     std::env::set_var("AETHER_ATTESTATION_SK", &k1);
     std::env::set_var("AETHER_ATTESTATION_KEY_ID", "k1-old");
