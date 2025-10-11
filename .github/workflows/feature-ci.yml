@@ -84,7 +84,6 @@ jobs:
         ports: ["9000:9000"]
         options: >-
           --health-cmd "curl -f http://localhost:9000/minio/health/ready || exit 1" --health-interval 5s --health-timeout 5s --health-retries 10
-        command: ["server", "/data", "--console-address", ":9001"]
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust toolchain
@@ -132,6 +131,9 @@ jobs:
       - name: Build (debug)
         run: cargo build --workspace --all-targets
       - name: Run tests (full)
+        env:
+          # Provide tokens for tests that enable auth enforcement explicitly
+          AETHER_API_TOKENS: t_admin:admin:alice,t_reader:reader:bob
         run: cargo test --workspace --all-features -- --nocapture
       - name: Focused exit code tests
         run: cargo test -p aether-cli --test exit_codes -- --nocapture
@@ -264,6 +266,9 @@ jobs:
       - name: Build (debug)
         run: cargo build --workspace --all-targets
       - name: Run full workspace tests (including control-plane)
+        env:
+          # Provide tokens for tests that enable auth enforcement explicitly
+          AETHER_API_TOKENS: t_admin:admin:alice,t_reader:reader:bob
         run: cargo test --workspace --all-features -- --nocapture
       - name: Build release aether-cli
         run: cargo build -p aether-cli --release

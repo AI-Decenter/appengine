@@ -76,7 +76,7 @@ async fn main() -> anyhow::Result<()> {
                 if !valid {
                     static UNAUTH_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
                     let n = UNAUTH_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    if n % 10 == 0 { tracing::warn!("auth.unauthorized.legacy_path"); }
+                    if n.is_multiple_of(10) { tracing::warn!("auth.unauthorized.legacy_path"); }
                     return Response::builder().status(401).body(Body::from("unauthorized")).unwrap();
                 }
             }

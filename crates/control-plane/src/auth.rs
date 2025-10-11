@@ -5,6 +5,7 @@ use std::{collections::HashMap, sync::Arc};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tracing::{warn, info};
 use uuid::Uuid;
+use std::str::FromStr;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Role {
@@ -12,14 +13,18 @@ pub enum Role {
 	Reader,
 }
 
-impl Role {
-	pub fn from_str(s: &str) -> Option<Self> {
+impl FromStr for Role {
+	type Err = ();
+	fn from_str(s: &str) -> Result<Self, Self::Err> {
 		match s {
-			"admin" => Some(Role::Admin),
-			"reader" => Some(Role::Reader),
-			_ => None,
+			"admin" => Ok(Role::Admin),
+			"reader" => Ok(Role::Reader),
+			_ => Err(()),
 		}
 	}
+}
+
+impl Role {
 	pub fn as_str(&self) -> &'static str {
 		match self { Role::Admin => "admin", Role::Reader => "reader" }
 	}
@@ -69,7 +74,7 @@ impl AuthStore {
 			let role_s = segs.next().unwrap_or("");
 			let name = segs.next().map(|s| s.to_string());
 			if token.is_empty() || role_s.is_empty() { continue; }
-			let Some(role) = Role::from_str(role_s) else { continue; };
+			let Ok(role) = Role::from_str(role_s) else { continue; };
 			let mut hasher = Sha256::new();
 			hasher.update(token.as_bytes());
 			let hash = hasher.finalize();
@@ -102,18 +107,18 @@ pub async fn auth_middleware(mut req: Request, next: Next, store: Arc<AuthStore>
 	static UNAUTH_COUNT: AtomicUsize = AtomicUsize::new(0);
 	let Some(val) = req.headers().get(axum::http::header::AUTHORIZATION) else {
 		let c = UNAUTH_COUNT.fetch_add(1, Ordering::Relaxed);
-		if c % 10 == 0 { warn!("auth.unauthorized.missing_header"); }
+	if c.is_multiple_of(10) { warn!("auth.unauthorized.missing_header"); }
 		return Err(axum::response::Response::builder().status(StatusCode::UNAUTHORIZED).body(axum::body::Body::empty()).unwrap());
 	};
 	let Ok(hdr) = val.to_str() else {
 		let c = UNAUTH_COUNT.fetch_add(1, Ordering::Relaxed);
-		if c % 10 == 0 { warn!("auth.unauthorized.bad_header"); }
+	if c.is_multiple_of(10) { warn!("auth.unauthorized.bad_header"); }
 		return Err(axum::response::Response::builder().status(StatusCode::UNAUTHORIZED).body(axum::body::Body::empty()).unwrap());
 	};
 	let prefix = "Bearer ";
 	if !hdr.starts_with(prefix) {
 		let c = UNAUTH_COUNT.fetch_add(1, Ordering::Relaxed);
-		if c % 10 == 0 { warn!("auth.unauthorized.bad_schema"); }
+	if c.is_multiple_of(10) { warn!("auth.unauthorized.bad_schema"); }
 		return Err(axum::response::Response::builder().status(StatusCode::UNAUTHORIZED).body(axum::body::Body::empty()).unwrap());
 	}
 	let token = &hdr[prefix.len()..];
@@ -148,7 +153,7 @@ pub async fn auth_middleware(mut req: Request, next: Next, store: Arc<AuthStore>
 }
 
 // Route-level RBAC guard; min_role enforced if auth is enabled; otherwise pass-through
-pub async fn require_role(mut req: Request, next: Next, store: Arc<AuthStore>, min_role: Role) -> Result<axum::response::Response, axum::response::Response> {
+pub async fn require_role(req: Request, next: Next, store: Arc<AuthStore>, min_role: Role) -> Result<axum::response::Response, axum::response::Response> {
 	if !is_auth_enabled(&store) { return Ok(next.run(req).await); }
 	if let Some(ctx) = req.extensions().get::<UserContext>() {
 		if ctx.role.allows(min_role) { return Ok(next.run(req).await); }

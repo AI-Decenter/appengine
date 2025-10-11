@@ -67,6 +67,8 @@ jobs:
         env:
           AETHER_FAST_TEST: '1'
           EXPECT_FAST: '1'
+          # Provide dummy tokens to auth-aware tests (middleware defaults to optional auth)
+          AETHER_API_TOKENS: t_admin:admin:alice,t_reader:reader:bob
         run: |
           cargo test -p control-plane --lib --all-features -- --nocapture
           cargo test -p control-plane --test sbom_manifest_enforcement -- --nocapture
@@ -120,6 +122,9 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Full workspace tests (all features)
+        env:
+          # Tokens available for tests that opt-in to auth; enforcement remains opt-out by default
+          AETHER_API_TOKENS: t_admin:admin:alice,t_reader:reader:bob
         run: |
           cargo test --workspace --all-features -- --nocapture
 

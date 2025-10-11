@@ -204,6 +204,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/artifacts/:digest/sbom", get(handlers::artifacts::get_sbom))
         .route("/artifacts/:digest/manifest", get(handlers::artifacts::get_manifest))
         .route("/provenance", get(handlers::provenance::list_provenance))
+        .route("/artifacts/:digest/sbom", axum::routing::post(handlers::artifacts::upload_sbom))
+        .route("/artifacts/:digest/manifest", axum::routing::post(handlers::artifacts::upload_manifest))
         .route("/provenance/:digest", get(handlers::provenance::get_provenance))
         .route("/provenance/:digest/attestation", get(handlers::provenance::get_attestation))
         .route("/provenance/keys", get(handlers::keys::list_keys))
