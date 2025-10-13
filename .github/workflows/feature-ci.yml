@@ -66,6 +66,7 @@ jobs:
       AETHER_ARTIFACT_BUCKET: artifacts
       AETHER_S3_ENDPOINT_URL: http://localhost:9000
       MINIO_TEST: "1"
+      RUSTFLAGS: -C debuginfo=1
     services:
       postgres:
         image: postgres:15
@@ -129,13 +130,21 @@ jobs:
         run: sqlx migrate run
       - name: Build (debug)
         run: cargo build --workspace --all-targets
-      - name: Run tests (full)
+      - name: Run tests (workspace, PR-safe)
         env:
           # Provide tokens for tests that enable auth enforcement explicitly
           AETHER_API_TOKENS: t_admin:admin:alice,t_reader:reader:bob
           # Use per-test DB pools to avoid runtime shutdown issues
           AETHER_TEST_SHARED_POOL: '0'
-        run: cargo test --workspace --all-features -- --nocapture --test-threads=4
+        run: cargo test --workspace -- --nocapture --test-threads=4
+
+      - name: Control-plane S3 tests (feature-gated)
+        env:
+          # Provide tokens for tests that enable auth enforcement explicitly
+          AETHER_API_TOKENS: t_admin:admin:alice,t_reader:reader:bob
+          # Use per-test DB pools to avoid runtime shutdown issues
+          AETHER_TEST_SHARED_POOL: '0'
+        run: cargo test -p control-plane --features s3 -- --nocapture --test-threads=2
       - name: Network stack regression check
         run: |
           bash scripts/check-network-stack.sh
