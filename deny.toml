@@ -32,9 +32,14 @@ allow = [
 	"BSD-2-Clause",
 	"ISC",
 	"Unicode-DFS-2016",
+	"Unicode-3.0",
+	"MPL-2.0",
 	"Zlib",
 ]
-exceptions = []
+exceptions = [
+	# webpki-roots uses CDLA-Permissive-2.0 which we allow only for this crate
+	{ allow = ["CDLA-Permissive-2.0"], crate = "webpki-roots" },
+]
 
 [sources]
 unknown-registry = "warn"
@@ -43,10 +48,7 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = []
 
 [advisories]
-vulnerability = "deny"
-unmaintained = "deny"
-notice = "warn"
-unsound = "deny"
+unmaintained = "all"
 # Temporarily ignore advisories until upstream deps update (tracked in Issue 11/security hardening)
 ignore = [
 	# instant unmaintained via backoff -> kube-runtime
@@ -55,4 +57,8 @@ ignore = [
 	"RUSTSEC-2024-0436",
 	# sqlx protocol truncation; requires >=0.8.1; we will bump post-review
 	"RUSTSEC-2024-0363",
+	# backoff unmaintained via kube/kube-runtime
+	"RUSTSEC-2025-0012",
+	# derivative unmaintained via kube/kube-runtime
+	"RUSTSEC-2024-0388",
 ]
