@@ -10,6 +10,32 @@ pub async fn handle(app: Option<String>) -> Result<()> {
 	let format = std::env::var("AETHER_LOGS_FORMAT").unwrap_or_else(|_| "text".into()); // default to human text
 	let tail: u32 = std::env::var("AETHER_LOGS_TAIL").ok().and_then(|v| v.parse().ok()).unwrap_or(100);
 
+	// Mock mode: allow tests/dev to bypass network entirely. Triggered if:
+	// - AETHER_LOGS_MOCK=1 or true
+	// - AETHER_MOCK_MODE=1 or true
+	// - AETHER_API_BASE uses an unbound port like :0 (common in tests)
+	let logs_mock_env = std::env::var("AETHER_LOGS_MOCK").ok().map(|v| v=="1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
+	let mock_mode_env = std::env::var("AETHER_MOCK_MODE").ok().map(|v| v=="1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
+	let base_is_unbound = base.contains(":0");
+	if logs_mock_env || mock_mode_env || base_is_unbound {
+		debug!(mock = true, %base, "logs.mock.enabled");
+		use tokio::io::AsyncWriteExt;
+		let mut stdout = tokio::io::stdout();
+		if format.eq_ignore_ascii_case("json") {
+			let ts = "2024-01-01T00:00:00Z";
+			let line1 = format!("{{\"time\":\"{}\",\"app\":\"{}\",\"pod\":\"pod-1\",\"container\":\"c\",\"message\":\"mock line 1\"}}\n", ts, appn);
+			let line2 = format!("{{\"time\":\"{}\",\"app\":\"{}\",\"pod\":\"pod-1\",\"container\":\"c\",\"message\":\"mock line 2\"}}\n", ts, appn);
+			stdout.write_all(line1.as_bytes()).await?;
+			stdout.write_all(line2.as_bytes()).await?;
+		} else {
+			stdout.write_all(b"mock line 1\n").await?;
+			stdout.write_all(b"mock line 2\n").await?;
+		}
+		stdout.flush().await.ok();
+		info!(app=%appn, "logs.stream.end.mock");
+		return Ok(());
+	}
+
 	let mut url = format!("{}/apps/{}/logs?tail_lines={}&format={}", base.trim_end_matches('/'), urlencoding::encode(&appn), tail, format);
 	if follow { url.push_str("&follow=true"); }
 	if let Some(s) = since { url.push_str("&since="); url.push_str(&urlencoding::encode(&s)); }
@@ -17,7 +43,7 @@ pub async fn handle(app: Option<String>) -> Result<()> {
 
 	debug!(%url, "logs.request");
 	let client = reqwest::Client::builder().build()?;
-	let mut resp = client.get(&url).send().await.context("request logs")?;
+	let resp = client.get(&url).send().await.context("request logs")?;
 	if !resp.status().is_success() {
 		anyhow::bail!("logs fetch failed: {}", resp.status());
 	}
