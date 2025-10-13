@@ -47,3 +47,6 @@ ingress:
         - path: /
           pathType: Prefix
   tls: []
+
+# Optional additional config entries for the ConfigMap
+config: {}

@@ -4,4 +4,9 @@ metadata:
   name: {{ include "control-plane.fullname" . }}
   labels:
     app: {{ include "control-plane.name" . }}
-data: {}
+data:
+  {{- if .Values.config }}
+{{ toYaml .Values.config | indent 2 }}
+  {{- else }}
+  {}
+  {{- end }}
