@@ -105,6 +105,14 @@ jobs:
         with:
           sarif_file: trivy-results.sarif
 
+      - name: Summarize HIGH/CRITICAL findings
+        run: |
+          jq -r '[.Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL" or .Severity=="HIGH")] \
+            | sort_by(.Severity) \
+            | .[] \
+            | "\(.Severity)\t\(.VulnerabilityID)\t\(.PkgName)\tinstalled=\(.InstalledVersion)\tfixed=\(.FixedVersion // \"n/a\")"' trivy-results.json \
+            > trivy-findings.txt || true
+
       - name: Install grype
         uses: anchore/scan-action/download-grype@v3
 
@@ -135,6 +143,7 @@ jobs:
             trivy-results.sarif
             trivy-results.json
             trivy-summary.json
+            trivy-findings.txt
             ${{ steps.grype.outputs.sarif }}
 
       - name: Enforce gate (0 CRITICAL or 0 CRITICAL+HIGH)
