@@ -1,0 +1,10 @@
+{
+  "bench_id": "packaging",
+  "metric": "duration_ms",
+  "unit": "ms",
+  "p50": 120.0,
+  "p95": 150.0,
+  "n": 50,
+  "timestamp": "2025-01-01T00:00:00Z",
+  "notes": "Fixture baseline for packaging"
+}

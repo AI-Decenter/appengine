@@ -1,0 +1,5 @@
+# Trivy allowlist: list CVE IDs to ignore globally in scans
+# Lines starting with # are comments.
+# Example entries (remove or replace with real CVEs you accept to ignore):
+# CVE-2024-12345
+# CVE-2023-99999

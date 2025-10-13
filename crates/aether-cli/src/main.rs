@@ -32,7 +32,7 @@ async fn dispatch(cli: Cli, _cfg: EffectiveConfig) -> Result<()> {
     let start = Instant::now();
     let result = match cli.command {
         Commands::Login { username } => { let _span = info_span!("cmd.login").entered(); commands::login::handle(username).await }
-    Commands::Deploy { dry_run, pack_only, compression_level, out, no_upload, no_cache, no_sbom, format, legacy_upload, dev_hot } => { let _span = info_span!("cmd.deploy", dry_run, pack_only, compression_level, out=?out, no_upload, no_cache, no_sbom, format=?format, legacy_upload, dev_hot); commands::deploy::handle(commands::deploy::DeployOptions { dry_run, pack_only, compression_level, out, no_upload, no_cache, no_sbom, format, use_legacy_upload: legacy_upload, dev_hot }).await }
+    Commands::Deploy { dry_run, pack_only, compression_level, out, no_upload, no_cache, no_sbom, cyclonedx, format, legacy_upload, dev_hot } => { let _span = info_span!("cmd.deploy", dry_run, pack_only, compression_level, out=?out, no_upload, no_cache, no_sbom, cyclonedx, format=?format, legacy_upload, dev_hot); commands::deploy::handle(commands::deploy::DeployOptions { dry_run, pack_only, compression_level, out, no_upload, no_cache, no_sbom, cyclonedx, format, use_legacy_upload: legacy_upload, dev_hot }).await }
         Commands::Logs { app } => { let _span = info_span!("cmd.logs"); commands::logs::handle(app).await }
         Commands::List {} => { let _span = info_span!("cmd.list"); commands::list::handle().await }
         Commands::Completions { shell } => { let _span = info_span!("cmd.completions"); commands::completions::handle(shell) }
@@ -40,6 +40,7 @@ async fn dispatch(cli: Cli, _cfg: EffectiveConfig) -> Result<()> {
         Commands::Iofail {} => { let _span = info_span!("cmd.iofail"); commands::iofail::handle().await }
         Commands::Usagefail {} => { let _span = info_span!("cmd.usagefail"); commands::usagefail::handle().await }
         Commands::Runtimefail {} => { let _span = info_span!("cmd.runtimefail"); commands::runtimefail::handle().await }
+        Commands::Dev { hot, interval } => { let _span = info_span!("cmd.dev", hot, interval); commands::dev::handle(hot, interval).await }
     };
     let took_d = start.elapsed();
     let took_ms = took_d.as_millis();
