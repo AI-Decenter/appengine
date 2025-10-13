@@ -2,6 +2,8 @@
 Owner: Person B
 Estimate: 8 pts (B1:5, B2:3)
 
+Status: Done (Merged to main)
+
 Summary
 Package the control-plane for easy install and provide required ServiceAccount/Role/RoleBinding for dev-hot operations.
 
@@ -46,6 +48,9 @@ helm upgrade --install aether charts/control-plane -n aether-system --create-nam
   --set env.DATABASE_URL=postgres://aether:postgres@postgres:5432/aether \
   --set env.TOKENS=t_admin:admin:alice
 ```
+
+Further reading
+- Helm chart usage guide: ../helm/README.md
 
 References
 - ../../SPRINT_PLAN.md (Epic B)
