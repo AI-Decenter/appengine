@@ -7,16 +7,17 @@ Implement server-side log streaming from Kubernetes and integrate with CLI for a
 
 Tasks
 - [ ] A1 Implement GET /apps/{app}/logs with Kubernetes stream
-  - kube-rs: labelSelector app=<name>
-  - follow=true, tail_lines=100, since (optional)
-  - Stream as JSON lines (default) with metadata; optional plain text
-  - WebSocket upgrade if feature-flagged; fallback to chunked transfer
-  - Tests: mock-kube feature; integration path
+  - [x] Control-plane route `/apps/{app}/logs` wired; mock streaming path produces ndjson/text
+  - [x] Query params accepted: follow/tail_lines/since/container; content-type set (ndjson or text)
+  - [x] CLI `aether logs` streams response (JSON/text) with flags; tests added; mock mode for CI
+  - [ ] Real Kubernetes streaming via kube-rs with labelSelector app=<name>
+  - [ ] WebSocket upgrade behind feature flag; fallback to chunked transfer
+  - [ ] Integration tests using mock-kube for logs endpoint (non-mock path)
 - [ ] A2 Robustness: multi-pod, container selection, time filters
-  - Handle multiple pods (merge streams, tag by pod/container)
-  - --container flag, --since duration
-  - Backpressure and reconnect loop
-  - Tests simulate 2 pods
+  - [ ] Merge multiple pod streams, tagged by pod/container
+  - [ ] --container selection end-to-end; --since duration parsing and translation
+  - [ ] Backpressure and reconnect loop for long-lived streams
+  - [ ] Tests simulate 2 pods and container filtering
 
 Dependencies
 - Kubernetes access (minikube/microk8s) or mock-kube for tests
@@ -26,6 +27,21 @@ DoD
 - Control-plane endpoint streams logs; documented in OpenAPI
 - CLI `aether logs` works with --follow/--since/--container, reconnection handled
 - Integration tests green (mock-kube) and manual demo in a cluster
+
+Status Update — 2025-10-13
+
+- What’s done
+  - Control-plane: `/apps/{app}/logs` handler implemented with a mock/test streaming path. Accepts follow/tail_lines/since/container; emits JSON lines (default) or text/plain. Marker header added for diagnostics.
+  - CLI: `aether logs` implemented to stream HTTP response to stdout (JSON or text). Added a CLI-side mock mode toggled by env (AETHER_LOGS_MOCK or base :0) to keep CI green without network.
+  - Tests: Control-plane library tests cover mock path; CLI unit + integration tests pass using mock server/mock mode.
+- What’s pending
+  - Real Kubernetes streaming with kube-rs (labelSelector = app=<name>), including follow/tail/since and optional WebSocket mode.
+  - Robustness work: multi-pod merge, container selection end-to-end, backpressure and reconnect behavior; mock-kube integration tests.
+- Reference commits
+  - CLI mock logs mode: 14a79af (main)
+- Quick try (dev)
+  - Mock: set `AETHER_LOGS_MOCK=1` then run `aether logs`.
+  - Real: set `AETHER_API_BASE` to control-plane URL and run `aether logs` (JSON by default; set `AETHER_LOGS_FORMAT=text` for plain text).
 
 References
 - ../../SPRINT_PLAN.md (Epic A)
