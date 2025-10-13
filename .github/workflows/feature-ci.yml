@@ -150,6 +150,9 @@ jobs:
           bash scripts/check-network-stack.sh
       - name: Cargo Deny (bans)
         uses: EmbarkStudios/cargo-deny-action@v1
+        env:
+          # Running inside the action's container; do not wrap rustc
+          RUSTC_WRAPPER: ""
         with:
           command: check bans
       - name: Focused exit code tests
