@@ -1,6 +1,5 @@
 use anyhow::{Result, Context};
 use tracing::{info, debug};
-use std::time::Duration;
 
 pub async fn handle(app: Option<String>) -> Result<()> {
 	let appn = app.unwrap_or_else(|| std::env::var("AETHER_DEFAULT_APP").unwrap_or_else(|_| "sample-app".into()));

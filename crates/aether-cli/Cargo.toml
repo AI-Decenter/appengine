@@ -38,6 +38,8 @@ indicatif = "0.17"
 async-stream = "0.3"
 bytes = "1"
 humantime = "2"
+futures-util = { workspace = true }
+urlencoding = "2"
 
 [[bench]]
 name = "pack_bench"
