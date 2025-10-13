@@ -21,6 +21,7 @@ env:
   IMAGE_NAME: aether-nodejs
   IMAGE_TAG: 20-slim
   REGISTRY: ghcr.io
+  GATE_SEVERITY: HIGH
 
 jobs:
   build-publish-scan:
@@ -84,16 +85,19 @@ jobs:
           severity: CRITICAL,HIGH,MEDIUM,LOW,UNKNOWN
           exit-code: '0'
           ignore-unfixed: true
+          trivyignores: .trivyignore
 
       - name: Trivy scan (JSON summary for gating)
         id: trivy_json
         run: |
-          trivy image --format json --output trivy-results.json --severity CRITICAL --ignore-unfixed ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}-ci || true
+          if [ "${{ env.GATE_SEVERITY }}" = "HIGH" ]; then SEV='CRITICAL,HIGH'; else SEV='CRITICAL'; fi
+          trivy image --format json --output trivy-results.json --severity "$SEV" --ignore-unfixed --ignorefile .trivyignore ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}-ci || true
           CRIT=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL")] | length' trivy-results.json)
+          HIGH=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="HIGH")] | length' trivy-results.json)
           echo "critical_count=$CRIT" >> $GITHUB_OUTPUT
-          echo "Critical vulnerabilities: $CRIT"
-          # Save a minimal summary too
-          jq '{critical: [ .Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL") ] | length }' trivy-results.json > trivy-summary.json
+          echo "high_count=$HIGH" >> $GITHUB_OUTPUT
+          echo "CRITICAL: $CRIT, HIGH: $HIGH"
+          jq '{critical: [ .Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL") ] | length, high: [ .Results[]?.Vulnerabilities[]? | select(.Severity=="HIGH") ] | length }' trivy-results.json > trivy-summary.json
 
       - name: Upload Trivy results to code scanning
         if: always()
@@ -112,6 +116,8 @@ jobs:
           severity-cutoff: high
           fail-build: false
         continue-on-error: true
+        env:
+          GRYPE_CONFIG: ${{ github.workspace }}/security/grype-ignore.yaml
 
       - name: Upload Grype SARIF
         if: always() && steps.grype.outputs.sarif != ''
@@ -131,11 +137,16 @@ jobs:
             trivy-summary.json
             ${{ steps.grype.outputs.sarif }}
 
-      - name: Enforce 0 CRITICAL vulnerabilities
+      - name: Enforce gate (0 CRITICAL or 0 CRITICAL+HIGH)
         run: |
-          if [ "${{ steps.trivy_json.outputs.critical_count }}" != "0" ]; then
-            echo "Found ${{ steps.trivy_json.outputs.critical_count }} CRITICAL vulnerabilities. Failing."
-            exit 1
+          if [ "${{ env.GATE_SEVERITY }}" = "HIGH" ]; then \
+            if [ "${{ steps.trivy_json.outputs.critical_count }}" != "0" ] || [ "${{ steps.trivy_json.outputs.high_count }}" != "0" ]; then \
+              echo "Fail: found CRITICAL=${{ steps.trivy_json.outputs.critical_count }}, HIGH=${{ steps.trivy_json.outputs.high_count }}"; exit 1; \
+            fi; \
+          else \
+            if [ "${{ steps.trivy_json.outputs.critical_count }}" != "0" ]; then \
+              echo "Fail: found CRITICAL=${{ steps.trivy_json.outputs.critical_count }}"; exit 1; \
+            fi; \
           fi
 
       - name: Log in to GHCR
