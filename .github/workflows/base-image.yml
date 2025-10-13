@@ -113,6 +113,12 @@ jobs:
             | "\(.Severity)\t\(.VulnerabilityID)\t\(.PkgName)\tinstalled=\(.InstalledVersion)\tfixed=\(.FixedVersion // \"n/a\")"' trivy-results.json \
             > trivy-findings.txt || true
 
+      - name: Print summarized findings
+        if: always()
+        run: |
+          echo "=== Trivy Findings (HIGH/CRITICAL) ==="; \
+          (test -s trivy-findings.txt && cat trivy-findings.txt) || echo "No HIGH/CRITICAL findings or summary not generated."
+
       - name: Install grype
         uses: anchore/scan-action/download-grype@v3
 
