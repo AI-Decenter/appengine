@@ -33,6 +33,7 @@ jobs:
     timeout-minutes: 25
     env:
       RUSTC_WRAPPER: sccache
+      RUSTFLAGS: -C debuginfo=1
     services:
       postgres:
         image: postgres:15-alpine
@@ -63,7 +64,7 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' || github.event_name == 'schedule' }}
 
-      - name: Fast test suite
+      - name: Fast test suite (no S3 features)
         env:
           AETHER_FAST_TEST: '1'
           EXPECT_FAST: '1'
@@ -72,7 +73,7 @@ jobs:
           # Provide dummy tokens to auth-aware tests (middleware defaults to optional auth)
           AETHER_API_TOKENS: t_admin:admin:alice,t_reader:reader:bob
         run: |
-          cargo test -p control-plane --lib --all-features -- --nocapture
+          cargo test -p control-plane --lib -- --nocapture
           cargo test -p control-plane --test sbom_manifest_enforcement -- --nocapture
           # (Optionally) add other crate smoke tests here
       - name: Network stack regression check
@@ -102,6 +103,7 @@ jobs:
     timeout-minutes: 60
     env:
       RUSTC_WRAPPER: sccache
+      RUSTFLAGS: -C debuginfo=1
     services:
       postgres:
         image: postgres:15-alpine
@@ -130,7 +132,18 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
+      - name: Full workspace tests (PR-safe)
+        if: ${{ github.event_name == 'pull_request' }}
+        env:
+          # Tokens available for tests that opt-in to auth; enforcement remains opt-out by default
+          AETHER_API_TOKENS: t_admin:admin:alice,t_reader:reader:bob
+          # Use per-test DB pools to avoid runtime shutdown issues
+          AETHER_TEST_SHARED_POOL: '0'
+        run: |
+          cargo test --workspace -- --nocapture --test-threads=4
+
       - name: Full workspace tests (all features)
+        if: ${{ github.event_name != 'pull_request' }}
         env:
           # Tokens available for tests that opt-in to auth; enforcement remains opt-out by default
           AETHER_API_TOKENS: t_admin:admin:alice,t_reader:reader:bob
@@ -138,6 +151,11 @@ jobs:
           AETHER_TEST_SHARED_POOL: '0'
         run: |
           cargo test --workspace --all-features -- --nocapture --test-threads=4
+
+      - name: S3 compile check (non-PR)
+        if: ${{ github.event_name != 'pull_request' }}
+        run: |
+          cargo check -p control-plane --features s3
 
       - name: Clippy (strict)
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings

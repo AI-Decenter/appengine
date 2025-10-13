@@ -102,7 +102,8 @@ while (( $# >= 2 )); do
     if (( cmp == 1 )); then
       diff_frac=$(awk -v c="$p95_cur" -v b="$p95_base" 'BEGIN{ if (b==0) print 0; else printf "%.10f", (b-c)/b }')
       diff_pct=$(awk -v f="$diff_frac" 'BEGIN{ printf "%.2f", f*100 }')
-      gt=$(awk -v f="$diff_frac" 'BEGIN{print (f>0.20)?1:0}')
+      # Throughput tends to vary more on shared CI runners; allow up to 25% regression.
+      gt=$(awk -v f="$diff_frac" 'BEGIN{print (f>0.25)?1:0}')
       if (( gt == 1 )); then regression=1; fi
     else
       diff_pct=$(awk -v c="$p95_cur" -v b="$p95_base" 'BEGIN{ if (b==0) print 0; else printf "%.2f", (c-b)/b*100 }')

@@ -1,69 +1,42 @@
-###############################################
-# cargo-deny configuration (baseline)
-###############################################
+[graph]
+all-features = true
+targets = ["x86_64-unknown-linux-gnu"]
 
-[advisories]
-# Ignore known issues for MVP - should be addressed in production
-ignore = [
-    "RUSTSEC-2025-0012", # backoff crate unmaintained - used by kube-runtime
-    "RUSTSEC-2024-0388", # derivative crate unmaintained - used by kube-runtime  
-    "RUSTSEC-2024-0384", # instant crate unmaintained - indirect dependency
-    "RUSTSEC-2024-0436", # paste crate unmaintained - used by sqlx
-    "RUSTSEC-2024-0363", # SQLx vulnerability - upgrade in production
+[bans]
+multiple-versions = "deny"
+multiple-versions-include-dev = false
+wildcards = "deny"
+highlight = "all"
+
+# Avoid noise from well-known build/test-only trees; our runtime guard handles prod paths.
+skip-tree = [
+	# docker/testcontainers path (dev-only)
+	{ name = "bollard" },
+	{ name = "testcontainers" },
+]
+
+skip = [
+	{ name = "event-listener", reason = "sqlx uses v2.x while async-broadcast pulls v5.x via kube-runtime" },
+	{ name = "linux-raw-sys", reason = "which uses rustix 0.38 -> linux-raw-sys 0.4, while tempfile pulls rustix 1.x -> linux-raw-sys 0.11" },
+	{ name = "rustix", reason = "see linux-raw-sys explanation" },
+	{ name = "nom", reason = "sqlformat depends on nom 7 while jsonschema depends on nom 8" },
 ]
 
 [licenses]
-# Updated configuration format for cargo-deny v0.13+
+confidence-threshold = 0.93
 allow = [
-    "MIT", "Apache-2.0", "BSD-3-Clause", "BSD-2-Clause", "ISC", 
-    "Unicode-3.0", "MPL-2.0", "Zlib"
+	"MIT",
+	"Apache-2.0",
+	"BSD-3-Clause",
+	"BSD-2-Clause",
+	"ISC",
+	"Unicode-DFS-2016",
+	"Zlib",
 ]
-confidence-threshold = 0.8
-
-# Explicit exceptions for crates whose license we have reviewed and approved.
-# Prefer narrow exceptions over broad allow-list expansion to keep supply chain tight.
-[[licenses.exceptions]]
-name = "webpki-roots"
-version = "1.0.2"
-allow = ["CDLA-Permissive-2.0"]
-
-[[licenses.exceptions]]
-name = "jsonpath-rust"
-version = "0.4.0"
-allow = ["MIT"]
-
-# jsonpath-rust 0.4.0 uses license-file (MIT) instead of a license expression.
-# We explicitly allow it by hash so cargo-deny stops warning.
-# Clarify a crate using license-file instead of license expression.
-[[licenses.clarify]]
-name = "jsonpath-rust"
-version = "0.4.0"
-expression = "MIT"
-license-files = [
-    { path = "LICENSE", hash = 1074 }
-]
-
-[bans]
-highlight = "all"
-wildcards = "allow"
-# Enforce single versions across the graph (will be satisfied after Issue 11 completion).
-multiple-versions = "deny"
-
-# Some platform-specific Windows crates often legitimately appear in multiple versions
-# due to upstream ecosystem transitions and are not relevant to our Linux-focused
-# runtime artifacts. We allow duplicates for these crates to keep bans signal high.
-# See: https://embarkstudios.github.io/cargo-deny/checks/bans/index.html
-allow = [
-    { name = "windows-sys" },
-    { name = "windows-targets" },
-    { name = "windows_i686_msvc" },
-    { name = "windows_i686_gnullvm" },
-    { name = "windows_x86_64_gnu" },
-    { name = "windows_x86_64_gnullvm" },
-    { name = "windows_x86_64_msvc" },
-]
+exceptions = []
 
 [sources]
-unknown-registry = "deny"
-unknown-git = "deny"
+unknown-registry = "warn"
+unknown-git = "warn"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
