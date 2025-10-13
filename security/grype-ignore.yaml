@@ -1,0 +1,9 @@
+ignore:
+  # Example: ignore a CVE in a specific package and version range
+  # - vulnerability: CVE-2024-12345
+  #   fix-state: not-fixed
+  #   package:
+  #     name: libc6
+  #     version: 2.36-9+deb12uX
+  #     type: deb
+  #   rationale: "Legacy dependency; assessed low impact"
