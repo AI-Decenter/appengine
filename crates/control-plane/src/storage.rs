@@ -67,6 +67,8 @@ impl StorageBackend for S3StorageBackend {
         let uri = presigned.uri().to_string();
         let mut headers = std::collections::HashMap::new();
     for (k,v) in presigned.headers() { headers.insert(k.to_string(), v.to_string()); }
+        // Ensure metadata header is present in the advised headers for clients (required by presign signature)
+        headers.entry("x-amz-meta-sha256".into()).or_insert_with(|| digest.to_string());
         Ok(PresignedUpload { url: uri, method: "PUT".into(), headers, storage_key: key.to_string() })
     }
     async fn head_size(&self, key:&str) -> anyhow::Result<Option<i64>> {
