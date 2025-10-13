@@ -41,3 +41,18 @@ unknown-registry = "warn"
 unknown-git = "warn"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = []
+
+[advisories]
+vulnerability = "deny"
+unmaintained = "deny"
+notice = "warn"
+unsound = "deny"
+# Temporarily ignore advisories until upstream deps update (tracked in Issue 11/security hardening)
+ignore = [
+	# instant unmaintained via backoff -> kube-runtime
+	"RUSTSEC-2024-0384",
+	# paste unmaintained via sqlx 0.7.x
+	"RUSTSEC-2024-0436",
+	# sqlx protocol truncation; requires >=0.8.1; we will bump post-review
+	"RUSTSEC-2024-0363",
+]
