@@ -7,6 +7,11 @@
 # Be resilient locally: don't abort on first error; we handle failures and summarize
 set -uo pipefail
 
+# Tolerances (fraction). Allow overriding in CI via env vars.
+# Defaults: duration 20%, throughput 25%.
+DURATION_TOL_MAX=${DURATION_TOLERANCE:-0.20}
+THROUGHPUT_TOL_MAX=${THROUGHPUT_TOLERANCE:-0.25}
+
 if (( $# < 2 || ($# % 2) != 0 )); then
   echo "Usage: $0 BASELINE.json CURRENT.json [BASE2.json CUR2.json ...]" >&2
   exit 2
@@ -91,7 +96,7 @@ while (( $# >= 2 )); do
     if (( cmp == 1 )); then
       diff_frac=$(awk -v c="$p95_cur" -v b="$p95_base" 'BEGIN{ if (b==0) print 0; else printf "%.10f", (c-b)/b }')
       diff_pct=$(awk -v f="$diff_frac" 'BEGIN{ printf "%.2f", f*100 }')
-      gt=$(awk -v f="$diff_frac" 'BEGIN{print (f>0.20)?1:0}')
+  gt=$(awk -v f="$diff_frac" -v t="$DURATION_TOL_MAX" 'BEGIN{print (f>t)?1:0}')
       if (( gt == 1 )); then regression=1; fi
     else
       diff_pct=$(awk -v c="$p95_cur" -v b="$p95_base" 'BEGIN{ if (b==0) print 0; else printf "%.2f", (b-c)/b*100 }')
@@ -102,8 +107,8 @@ while (( $# >= 2 )); do
     if (( cmp == 1 )); then
       diff_frac=$(awk -v c="$p95_cur" -v b="$p95_base" 'BEGIN{ if (b==0) print 0; else printf "%.10f", (b-c)/b }')
       diff_pct=$(awk -v f="$diff_frac" 'BEGIN{ printf "%.2f", f*100 }')
-      # Throughput tends to vary more on shared CI runners; allow up to 25% regression.
-      gt=$(awk -v f="$diff_frac" 'BEGIN{print (f>0.25)?1:0}')
+  # Throughput tends to vary more on shared CI runners; default tolerance 25%.
+  gt=$(awk -v f="$diff_frac" -v t="$THROUGHPUT_TOL_MAX" 'BEGIN{print (f>t)?1:0}')
       if (( gt == 1 )); then regression=1; fi
     else
       diff_pct=$(awk -v c="$p95_cur" -v b="$p95_base" 'BEGIN{ if (b==0) print 0; else printf "%.2f", (c-b)/b*100 }')
