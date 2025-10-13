@@ -66,6 +66,7 @@ jobs:
       AETHER_ARTIFACT_BUCKET: artifacts
       AETHER_S3_ENDPOINT_URL: http://localhost:9000
       MINIO_TEST: "1"
+      RUSTFLAGS: -C debuginfo=1
     services:
       postgres:
         image: postgres:15
@@ -76,15 +77,6 @@ jobs:
         ports: ["5432:5432"]
         options: >-
           --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
-      minio:
-        image: quay.io/minio/minio:RELEASE.2024-09-22T00-00-00Z
-        env:
-          MINIO_ROOT_USER: minioadmin
-          MINIO_ROOT_PASSWORD: minioadmin
-        ports: ["9000:9000"]
-        options: >-
-          --health-cmd "curl -f http://localhost:9000/minio/health/ready || exit 1" --health-interval 5s --health-timeout 5s --health-retries 10
-        command: ["server", "/data", "--console-address", ":9001"]
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust toolchain
@@ -110,6 +102,13 @@ jobs:
             pg_isready -h 127.0.0.1 -U postgres && break
             sleep 1
           done
+      - name: Start MinIO (docker run)
+        run: |
+          docker rm -f ci-minio 2>/dev/null || true
+          docker run -d --name ci-minio -p 9000:9000 \
+            -e MINIO_ROOT_USER=${AWS_ACCESS_KEY_ID} \
+            -e MINIO_ROOT_PASSWORD=${AWS_SECRET_ACCESS_KEY} \
+            minio/minio:latest server /data --console-address :9001
       - name: Wait for MinIO
         run: |
           for i in {1..40}; do
@@ -131,8 +130,30 @@ jobs:
         run: sqlx migrate run
       - name: Build (debug)
         run: cargo build --workspace --all-targets
-      - name: Run tests (full)
-        run: cargo test --workspace --all-features -- --nocapture
+      - name: Run tests (workspace, PR-safe)
+        env:
+          # Provide tokens for tests that enable auth enforcement explicitly
+          AETHER_API_TOKENS: t_admin:admin:alice,t_reader:reader:bob
+          # Use per-test DB pools to avoid runtime shutdown issues
+          AETHER_TEST_SHARED_POOL: '0'
+        run: cargo test --workspace -- --nocapture --test-threads=4
+
+      - name: Control-plane S3 tests (feature-gated)
+        env:
+          # Provide tokens for tests that enable auth enforcement explicitly
+          AETHER_API_TOKENS: t_admin:admin:alice,t_reader:reader:bob
+          # Use per-test DB pools to avoid runtime shutdown issues
+          AETHER_TEST_SHARED_POOL: '0'
+        run: cargo test -p control-plane --features s3 -- --nocapture --test-threads=2
+      - name: Network stack regression check
+        run: |
+          bash scripts/check-network-stack.sh
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      - name: Cargo Deny (bans)
+        run: cargo deny --all-features check bans
       - name: Focused exit code tests
         run: cargo test -p aether-cli --test exit_codes -- --nocapture
       - name: Build release aether-cli
@@ -150,12 +171,74 @@ jobs:
           cargo sqlx prepare --workspace -- --all-targets
           git diff --name-only --exit-code sqlx-data.json || { echo 'sqlx-data.json not updated. Please commit.'; exit 1; }
 
+  benchmarks:
+    name: Benchmarks & Regression Guard
+    needs: lint
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: benches-${{ hashFiles('Cargo.lock') }}
+      - name: Verify regression script with fixtures (OK cases)
+        run: |
+          bash scripts/check-bench-regression.sh tests/bench-fixtures/baseline_pack.json tests/bench-fixtures/current_pack_better.json
+          bash scripts/check-bench-regression.sh tests/bench-fixtures/baseline_pack.json tests/bench-fixtures/current_pack_plus10.json
+          bash scripts/check-bench-regression.sh tests/bench-fixtures/baseline_stream.json tests/bench-fixtures/current_stream_better.json
+          bash scripts/check-bench-regression.sh tests/bench-fixtures/baseline_stream.json tests/bench-fixtures/current_stream_minus10.json
+      - name: Verify regression script with fixtures (expected failures)
+        run: |
+          set -e
+          if bash scripts/check-bench-regression.sh tests/bench-fixtures/baseline_pack.json tests/bench-fixtures/current_pack_plus25.json; then
+            echo "expected failure but passed (pack +25%)"; exit 1; else echo "expected failure: pack +25%"; fi
+          if bash scripts/check-bench-regression.sh tests/bench-fixtures/baseline_stream.json tests/bench-fixtures/current_stream_minus25.json; then
+            echo "expected failure but passed (stream -25%)"; exit 1; else echo "expected failure: stream -25%"; fi
+      - name: Run benches (aether-cli)
+        env:
+          RAYON_NUM_THREADS: '2'
+          RUST_LOG: 'off'
+        run: |
+          cargo bench -p aether-cli --bench pack_bench --bench stream_bench --quiet || true
+      - name: Compare bench outputs to baselines
+        env:
+          DURATION_TOLERANCE: '0.22'
+        run: |
+          # packaging vs committed baseline
+          bash scripts/check-bench-regression.sh \
+            crates/aether-cli/benches/baseline/bench-pack.json \
+            crates/aether-cli/target/benchmarks/bench-pack.json
+          # streaming vs committed baseline
+          bash scripts/check-bench-regression.sh \
+            crates/aether-cli/benches/baseline/bench-stream.json \
+            crates/aether-cli/target/benchmarks/bench-stream.json
+      - name: Upload bench JSON artifacts (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-jsons
+          path: |
+            crates/aether-cli/target/benchmarks/*.json
+            target/criterion/**
+          if-no-files-found: warn
+
   test-macos:
     name: Tests (macOS)
     needs: lint
     runs-on: macos-latest
     env:
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/aether_dev
+      # macOS runners don't support Docker; avoid S3 by using mock storage
+      AETHER_STORAGE_MODE: mock
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust toolchain
@@ -206,7 +289,12 @@ jobs:
       - name: Build (debug)
         run: cargo build --workspace --all-targets
       - name: Run full workspace tests (including control-plane)
-        run: cargo test --workspace --all-features -- --nocapture
+        env:
+          # Provide tokens for tests that enable auth enforcement explicitly
+          AETHER_API_TOKENS: t_admin:admin:alice,t_reader:reader:bob
+          # Use per-test DB pools to avoid runtime shutdown issues
+          AETHER_TEST_SHARED_POOL: '0'
+        run: cargo test --workspace --all-features -- --nocapture --test-threads=4
       - name: Build release aether-cli
         run: cargo build -p aether-cli --release
       - name: Upload aether-cli binary artifact

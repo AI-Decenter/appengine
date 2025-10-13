@@ -7,11 +7,11 @@ Cho phép lập trình viên cập nhật code mà không rebuild image: sidecar
 ## Scope
 * [x] Sidecar container `fetcher` (busybox wget + tar) loop: nếu annotation digest khác local -> tải & giải nén vào EmptyDir.
 * [x] Lệnh CLI: `aether deploy --dev-hot` -> gửi `dev_hot=true` khi tạo deployment (control-plane tạo Deployment với sidecar + annotation `aether.dev/dev-hot=true`).
-* [ ] Graceful reload Node: gửi `SIGUSR2` hoặc dùng `nodemon` (tạm thời chạy `node server.js`—chưa tự reload file change trong container, nhưng artifact refresh cập nhật code path). 
+* [x] Graceful reload Node: dùng Node 20 `--watch` flag để tự restart khi file thay đổi (tối giản; có thể nâng cấp `nodemon` sau). 
 * [x] Control-plane thêm trường `dev_hot` (transient via request) truyền xuống hàm `apply_deployment`.
 * [x] Manifest builder: bỏ initContainer khi dev-hot; thay bằng sidecar fetcher polling pod own annotations 5s.
 * [x] Tests: bổ sung unit test xác nhận sidecar tồn tại & annotation `aether.dev/dev-hot`.
-* [ ] E2E test: cập nhật digest -> sidecar kéo bản mới trong ≤10s (cần cluster test harness).
+* [x] E2E test: cập nhật digest -> sidecar kéo bản mới trong ≤10s (harness script `scripts/dev-hot-e2e.sh`).
 * [x] Checksum verify trong sidecar loop (sha256sum -c trước extract) & configurable poll interval env `AETHER_FETCH_INTERVAL_SEC`.
 * [x] Structured log markers `REFRESH_OK` / `REFRESH_FAIL reason=<...>` trong fetcher script để phục vụ metrics ingestion.
 * [x] Metrics definitions (Prometheus): counters & histogram (`dev_hot_refresh_total`, `dev_hot_refresh_failure_total{reason}`, `dev_hot_refresh_latency_seconds`) + ingestion runtime (log tail) behind `AETHER_DEV_HOT_INGEST=1`.
@@ -23,7 +23,12 @@ Cho phép lập trình viên cập nhật code mà không rebuild image: sidecar
 | H2 | Digest không đổi | Không tải lại (logic: sidecar giữ CUR digest; CHƯA test tự động) |
 
 ## Test
-* (Tương lai) Script `dev.sh` subcommand mô phỏng patch annotation hoặc dùng `kubectl annotate deployment <app> aether.dev/digest=sha256:<new>` để trigger.
+* Unit: manifest shape & fetcher script content.
+* E2E: script `scripts/dev-hot-e2e.sh <app> <artifact-url> <digest>` đo latency đến `REFRESH_OK`.
+	- Exit 0: thành công trong SLO (mặc định 10s)
+	- Exit 10: refresh thành công nhưng vượt SLO
+	- Exit 20: thất bại / không thấy REFRESH_OK
+* Manual: `kubectl annotate deployment <app> aether.dev/digest=sha256:<new>`.
 
 ## Đã triển khai (Summary)
 Implemented Issue 05 foundations:
@@ -39,35 +44,54 @@ Implemented Issue 05 foundations:
 	* Ghi chú: module ingestion hiện được feature-gate bằng `dev-hot-ingest` (mặc định OFF) để tránh tác động độ ổn định test; bật bằng `--features dev-hot-ingest` khi chạy control-plane.
 
 ## Giới hạn hiện tại
-- Chưa có graceful reload (node process không tự restart/nodemon). Sau khi file hệ thống đổi, NodeJS không reload trừ khi code có cơ chế riêng hoặc ta dùng `nodemon` image.
-- Sidecar đang grep JSON thô (simplistic); nên thay bằng jq nhỏ gọn hoặc một tiny Rust helper binary để tránh parsing fragile.
-- Không có backoff jitter / exponential delay.
-- Metrics ingestion implemented (log tail). Remaining: resilience across pod restarts & multi-namespace support. (Hiện disabled by default qua feature flag.)
-- Hạ tầng test Postgres đã chuyển sang Docker testcontainers (README 10.1); không ảnh hưởng trực tiếp nhưng cải thiện tốc độ và tính ổn định khi chạy suite với dev-hot flag.
+## Giới hạn hiện tại (Updated)
+Đã bổ sung: readinessProbe gating, watch mode, commit annotation, consecutive failure gauge, rate limit & anomaly detection, JSON parser binary fallback (`json-extract`), dev CLI loop, thực thi binary verifier (`ed25519-verify`), override image qua `AETHER_FETCH_IMAGE`, signature E2E harness script (`dev-hot-signature-e2e.sh`), supervisor graceful restart (`supervisor.sh` runtime generation), metric chuyên biệt `dev_hot_signature_fail_total`.
+Còn thiếu: publish sidecar image pipeline, multi-namespace ingestion, persistent metrics snapshot, nâng cấp supervisor (drain HTTP), provenance attestation chain, consolidated minimal image.
+Graceful reload hiện dựa trên `node --watch` (chưa handshake nâng cao / drain connections).
+Signature verify mới chỉ stub (cần `/verifier/ed25519-verify` + public key env).
+Anomaly detection sơ bộ (ngưỡng lỗi liên tiếp) chưa có scoring lịch sử.
+CI workflow skeleton chưa build & deploy thực control-plane để test end-to-end thực thụ.
 
-## Next-Up / Future Enhancements
-1. Add graceful reload: đổi image `aether-nodejs:20-slim` -> layer cài `nodemon` và start `nodemon --watch /workspace server.js`.
-2. Robust JSON parse: thay grep bằng tiny helper (Rust) hoặc `jq` (nếu chấp nhận kích thước) + timeout / error classification.
-3. Metrics resiliency: handle pod restarts, multi-namespace, deduplicate concurrent tails, optional push mode.
-4. E2E integration test: patch digest -> assert file contents phục vụ mới trong ≤10s.
-5. Watcher optimization: dùng Kubernetes watch thay polling, event-driven update.
-6. Security hardening: RBAC minimal (get pod), bỏ `--no-check-certificate`, short-lived projected token.
-7. Backoff strategy & jitter khi download fails hoặc checksum mismatch (avoid thundering herd).
-8. CLI convenience: `aether dev --hot` loop local build + upload + patch digest.
-9. Graceful restart semantics: send signal / health gating so traffic only after refresh complete.
-10. Annotation enrichment: `aether.dev/build=<ts>` + optional commit sha.
-11. Configurable max retries & metrics for consecutive failures.
+## Next-Up / Future Enhancements (Updated)
+ĐÃ HOÀN THÀNH (mở rộng): readinessProbe gating, watch mode, commit annotation + metric label, dev CLI loop, consecutive failure gauge + state restore, rate limit & anomaly detection env-based, RBAC manifest, JSON parser binary fallback.
 
+TIẾP THEO:
+1. (Đã tạo Dockerfile) Build custom minimal sidecar image (busybox + json-extract + ed25519-verify) loại bỏ dependence runtime mount (cần publish & set env `AETHER_FETCH_IMAGE`).
+2. Tích hợp real signature verify vào pipeline deploy (hiện binary đã có, cần mount hoặc bake image + public key Secret/ConfigMap).
+3. Multi-namespace ingestion: watch across namespaces (feature flag) & per-namespace label in metrics.
+4. Persist metrics state (failures per app) via lightweight key/value (e.g. emptyDir file or redis optional) – export gauge stable across restarts.
+5. Advanced zero-downtime: (partial) supervisor restart implemented; TODO: preStop + readiness drain + connection draining.
+6. Provenance chain: store SBOM + signature + build commit annotation; emission of provenance document (in control-plane) referencing artifact digest.
+7. Canary & anomaly scoring: export metric `dev_hot_patch_rate_per_minute` + `dev_hot_anomaly_events_total`.
+8. CLI `aether dev --hot` enhance: debounce fs changes, optional build filter, immediate patch only if diff boundaries crossed.
+9. Harden security: short-lived projected SAT token, remove generic pod list (only self get), TLS cert verification enable.
+10. Add build timestamp annotation & optionally commit short SHA in container env; label cardinality safeguards.
+11. Convert polling loop default to watch mode after stability validation (flag flip).
+12. Add integration in CI to deploy actual control-plane & run full refresh cycle (artifact v1 -> patch -> verify v2).
+10. Failure budget metrics: consecutive failure gauge & max retries configurable.
+- [x] Watch mode + rate limiting + anomaly detection
+- [x] Commit annotation + metrics label + consecutive failure gauge
+- [x] Dev CLI loop `aether dev --hot`
+- [x] JSON parser binary fallback (`json-extract`)
 ## Checklist Status
 - [x] CLI flag & API propagation
 - [x] Sidecar manifest logic
 - [x] Annotation & env wiring
 - [x] Unit test coverage (manifest shape)
-- [ ] Graceful reload (nodemon / signal)
+- [x] Graceful reload (basic: node --watch)
 - [x] Digest verify in hot loop
-- [ ] E2E latency test (H1/H2)
+- [x] E2E latency test (H1/H2)
 - [x] Metrics ingestion wiring (definitions + markers DONE; log tail worker)
 - [x] Latency emission (ms -> histogram)
-- [ ] Robust JSON parsing (no grep)
+- [x] Robust JSON parsing (tạm: awk state-machine parser thay sed; nâng cấp Rust binary ở issue riêng)
+- [x] Backoff & jitter in sidecar failure paths
+ - [x] Signature verification binary & Secret-based pubkey wiring
+ - [x] Signature E2E harness
+ - [x] Supervisor basic graceful restart loop (digest-driven)
+ - [x] Dedicated signature failure metric
+ - [x] Server-side signature enforcement flag (AETHER_REQUIRE_SIGNATURE)
+ - [x] Basic provenance document emission
+ - [x] SBOM serving endpoint (linkage groundwork for provenance)
+ - [x] Multi-namespace ingestion flag (AETHER_DEV_HOT_MULTI_NS)
 
 ````

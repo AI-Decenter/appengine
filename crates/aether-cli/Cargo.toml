@@ -37,9 +37,14 @@ tokio-util = { workspace = true }
 indicatif = "0.17"
 async-stream = "0.3"
 bytes = "1"
+humantime = "2"
 
 [[bench]]
 name = "pack_bench"
+harness = false
+
+[[bench]]
+name = "stream_bench"
 harness = false
 
 [dev-dependencies]
@@ -49,3 +54,7 @@ tempfile = "3"
 proptest = "1"
 axum = { workspace = true }
 rand = "0.8"
+chrono = { workspace = true }
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["server", "tokio"] }
+http-body-util = "0.1"
