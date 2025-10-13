@@ -24,8 +24,8 @@ env:
   AWS_REGION: us-east-1
   AWS_ACCESS_KEY_ID: dummy
   AWS_SECRET_ACCESS_KEY: dummy
-  # Toggle to run feature-gated S3 tests in non-PR full-tests (off by default)
-  AETHER_ENABLE_S3_FULL_CI: '0'
+  # Toggle to run feature-gated S3 tests in non-PR full-tests (enabled by default)
+  AETHER_ENABLE_S3_FULL_CI: '1'
 
 jobs:
   fast-tests:

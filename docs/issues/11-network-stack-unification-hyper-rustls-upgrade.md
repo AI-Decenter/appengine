@@ -140,6 +140,13 @@ Số đo hiện tại (release):
 - Guard mạng: `scripts/check-network-stack.sh` tiếp tục PASS với default build (không bật s3). Khi bật s3, legacy chain từ AWS vẫn còn (đã document); chờ connector hyper 1.x upstream.
 - Benchmark guard: nới ngưỡng throughput p95 xuống 25% để giảm nhiễu trên runner chia sẻ; duration vẫn 20%.
 
+Đo đạc mới (release):
+- Build time: 284s (docs/issues/11-network-stack-unification-hyper-rustls-upgrade/build-time-release.txt)
+- Binary sizes:
+	- aether-cli: 13382232 bytes
+	- control-plane: 21496256 bytes
+	- aether-operator: 8102760 bytes
+
 Trạng thái theo phases:
 - Phase 1: Hoàn tất 2/3 (thiếu tracking links upstream chính thức).
 - Phase 2: Hoàn tất (đã cô lập nguồn legacy vào feature `s3` và dev-only path).
@@ -154,4 +161,6 @@ Next steps (pending cho Issue 11):
 	- Xóa các mục `bans.skip` liên quan đến duplicate majors không còn cần thiết.
 	- Bật kiểm thử S3 rộng rãi trong CI (thiết lập env `AETHER_ENABLE_S3_FULL_CI=1` để kích hoạt step S3 tests không chỉ compile check).
 	- Chạy lại đo đạc thời gian build và kích thước binary, cập nhật artefacts và tài liệu.
+
+Ghi chú (tạm thời): Đã thử bump `aws-config`/`aws-sdk-s3` lên `2.x` nhưng crates.io hiện chưa phát hành ổn định bản này (krates yêu cầu chỉ rõ alpha nếu có). Giữ nguyên `1.x` với `features=["rustls","rt-tokio"]` cho đến khi connector hyper 1.x được phát hành chính thức.
 
