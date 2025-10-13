@@ -5,6 +5,5 @@ pub fn fixture_root() -> std::path::PathBuf {
         .join("..")
         .canonicalize().expect("canonicalize workspace");
     // go up to appengine
-    let appengine = root;
-    appengine
+    root
 }

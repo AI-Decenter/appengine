@@ -37,7 +37,8 @@ fn chart_structure_exists() -> Result<()> {
 
 #[derive(Debug, Deserialize)]
 struct ChartYaml {
-    apiVersion: String,
+    #[serde(rename = "apiVersion")]
+    api_version: String,
     name: String,
     version: String,
 }
@@ -48,7 +49,7 @@ fn chart_yaml_valid() -> Result<()> {
     let chart_path = root.join("charts/control-plane/Chart.yaml");
     let s = fs::read_to_string(&chart_path).with_context(|| chart_path.display().to_string())?;
     let chart: ChartYaml = serde_yaml::from_str(&s)?;
-    assert!(chart.apiVersion.starts_with("v2"), "apiVersion must be v2*");
+    assert!(chart.api_version.starts_with("v2"), "apiVersion must be v2*");
     assert_eq!(chart.name, "control-plane");
     // semver-ish
     assert!(chart.version.split('.').count() >= 2);
