@@ -20,6 +20,7 @@ skip = [
 	{ name = "linux-raw-sys", reason = "which uses rustix 0.38 -> linux-raw-sys 0.4, while tempfile pulls rustix 1.x -> linux-raw-sys 0.11" },
 	{ name = "rustix", reason = "see linux-raw-sys explanation" },
 	{ name = "nom", reason = "sqlformat depends on nom 7 while jsonschema depends on nom 8" },
+	{ name = "hashbrown", reason = "sqlx (via hashlink) uses 0.14 while aws-sdk-s3 (via lru) uses 0.15; unify when upstream updates" },
 ]
 
 [licenses]
