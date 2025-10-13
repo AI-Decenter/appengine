@@ -149,5 +149,9 @@ Trạng thái theo phases:
 
 Next steps (pending cho Issue 11):
 1) Thêm tracking links đến issues upstream (kube/aws-smithy/hyper-rustls) và theo dõi tiến độ connector hyper 1.x cho AWS.
-2) Khi upstream sẵn sàng, bump aws crates, bật test `--features s3` trong tất cả đường CI, gỡ `bans.skip` tương ứng, và cập nhật artefacts đo đạc lần nữa.
+2) Khi upstream sẵn sàng (AWS hyper 1.x):
+	- Bump phiên bản `aws-config`/`aws-sdk-s3` sang nhánh dùng hyper 1.x.
+	- Xóa các mục `bans.skip` liên quan đến duplicate majors không còn cần thiết.
+	- Bật kiểm thử S3 rộng rãi trong CI (thiết lập env `AETHER_ENABLE_S3_FULL_CI=1` để kích hoạt step S3 tests không chỉ compile check).
+	- Chạy lại đo đạc thời gian build và kích thước binary, cập nhật artefacts và tài liệu.
 

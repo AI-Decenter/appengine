@@ -153,7 +153,7 @@ jobs:
         with:
           tool: cargo-deny
       - name: Cargo Deny (bans)
-        run: cargo deny check bans
+        run: cargo deny --all-features check bans
       - name: Focused exit code tests
         run: cargo test -p aether-cli --test exit_codes -- --nocapture
       - name: Build release aether-cli

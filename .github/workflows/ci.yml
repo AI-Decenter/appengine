@@ -24,6 +24,8 @@ env:
   AWS_REGION: us-east-1
   AWS_ACCESS_KEY_ID: dummy
   AWS_SECRET_ACCESS_KEY: dummy
+  # Toggle to run feature-gated S3 tests in non-PR full-tests (off by default)
+  AETHER_ENABLE_S3_FULL_CI: '0'
 
 jobs:
   fast-tests:
@@ -84,7 +86,7 @@ jobs:
         with:
           tool: cargo-deny
       - name: Cargo Deny (bans)
-        run: cargo deny check bans
+        run: cargo deny --all-features check bans
 
       - name: Clippy (warnings as errors)
         run: cargo clippy --all-targets --all-features -- -D warnings
@@ -158,6 +160,16 @@ jobs:
         if: ${{ github.event_name != 'pull_request' }}
         run: |
           cargo check -p control-plane --features s3
+
+      - name: Control-plane S3 tests (opt-in)
+        if: ${{ github.event_name != 'pull_request' && env.AETHER_ENABLE_S3_FULL_CI == '1' }}
+        env:
+          # Provide tokens for tests that enable auth enforcement explicitly
+          AETHER_API_TOKENS: t_admin:admin:alice,t_reader:reader:bob
+          # Use per-test DB pools to avoid runtime shutdown issues
+          AETHER_TEST_SHARED_POOL: '0'
+        run: |
+          cargo test -p control-plane --features s3 -- --nocapture --test-threads=2
 
       - name: Clippy (strict)
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
