@@ -91,6 +91,15 @@ jobs:
       - name: Clippy (warnings as errors)
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+      - name: Helm lint (optional)
+        run: |
+          if command -v helm >/dev/null 2>&1; then
+            helm lint charts/control-plane || exit 1
+            helm template test charts/control-plane --set env.DATABASE_URL=postgres://u:p@h:5432/db --set env.TOKENS=t_admin:admin:alice >/dev/null
+          else
+            echo "helm not installed; skipping"
+          fi
+
       - name: sccache stats
         run: sccache --show-stats || true
 
@@ -196,6 +205,15 @@ jobs:
 
       - name: Clippy (strict)
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Helm lint (optional)
+        run: |
+          if command -v helm >/dev/null 2>&1; then
+            helm lint charts/control-plane || exit 1
+            helm template test charts/control-plane --set env.DATABASE_URL=postgres://u:p@h:5432/db --set env.TOKENS=t_admin:admin:alice >/dev/null
+          else
+            echo "helm not installed; skipping"
+          fi
 
       - name: Doc build
         run: cargo doc --no-deps --workspace

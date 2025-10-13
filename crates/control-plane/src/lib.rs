@@ -290,12 +290,15 @@ mod tests {
 
     #[tokio::test]
     async fn app_logs_empty() {
+    std::env::set_var("AETHER_MOCK_LOGS","1");
     let pool = crate::test_support::test_pool().await;
     let app = build_router(AppState { db: pool });
         let res = app.oneshot(Request::builder().uri("/apps/demo/logs").body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
+        let ct = res.headers().get("content-type").unwrap().to_str().unwrap();
+        assert!(ct.starts_with("application/x-ndjson"));
         let body = axum::body::to_bytes(res.into_body(), 1024).await.unwrap();
-        assert!(body.is_empty());
+        assert!(!body.is_empty());
     }
 
     #[tokio::test]
@@ -343,8 +346,8 @@ mod tests {
         let body = axum::body::to_bytes(res.into_body(), 10_000).await.unwrap();
         let s = String::from_utf8(body.to_vec()).unwrap();
         let lines: Vec<&str> = s.lines().collect();
-        // follow=false with tail=1 stops after first line across multi-pod loop (deterministic)
-        assert_eq!(lines.len(), 1);
+    // follow=false with tail=1 returns one line total (not per pod). Our mock stops after first line globally.
+    assert_eq!(lines.len(), 1);
     }
 
     #[tokio::test]

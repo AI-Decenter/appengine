@@ -35,6 +35,7 @@ serviceAccount:
 rbac:
   create: true
   namespace: ""
+  allowSecrets: false
 
 ingress:
   enabled: false

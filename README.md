@@ -207,6 +207,42 @@ Content-Type: application/json
 {
 	"code": "conflict",
 	"message": "application name exists"
+## Helm install (Control Plane)
+
+Quick start (dev):
+
+1) Provide DB URL and optional tokens via values (or use existing Secret `aether-postgres` with key `url`).
+
+Example minimal values.yaml:
+
+```
+image:
+	repository: ghcr.io/internal/aether/control-plane
+	tag: 0.1.0
+env:
+	DATABASE_URL: postgres://aether:postgres@postgres:5432/aether
+	TOKENS: t_admin:admin:alice,t_reader:reader:bob
+serviceAccount:
+	create: true
+	name: aether-dev-hot
+rbac:
+	create: true
+	namespace: aether-system
+	allowSecrets: false
+```
+
+Install:
+
+```
+helm upgrade --install aether charts/control-plane -n aether-system --create-namespace -f values.yaml
+```
+
+CI checks run `helm lint` and `helm template` if Helm is present on the runner.
+
+RBAC notes:
+- ServiceAccount `aether-dev-hot` is bound to a Role with least-privilege access to pods and pod logs in the target namespace.
+- Optional secret read can be enabled with `rbac.allowSecrets=true`.
+
 }
 ```
 

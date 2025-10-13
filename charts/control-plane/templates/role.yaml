@@ -11,4 +11,9 @@ rules:
   - apiGroups: ['']
     resources: ['pods']
     verbs: ['patch']
+  {{- if .Values.rbac.allowSecrets }}
+  - apiGroups: ['']
+    resources: ['secrets']
+    verbs: ['get']
+  {{- end }}
 {{- end }}

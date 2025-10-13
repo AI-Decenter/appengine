@@ -102,3 +102,15 @@ fn makefile_has_helm_targets() -> Result<()> {
     assert!(s.contains("helm-template"), "Makefile must have helm-template target");
     Ok(())
 }
+
+#[test]
+fn ci_contains_helm_checks() -> Result<()> {
+    let root = app_root();
+    let ci = root.join(".github/workflows/ci.yml");
+    let s = fs::read_to_string(&ci)?;
+    let has = s.contains("helm lint") || s.contains("helm-lint");
+    assert!(has, "CI should contain helm lint step or make helm-lint");
+    let rendered = s.contains("helm template") || s.contains("helm-template");
+    assert!(rendered, "CI should contain helm template step or make helm-template");
+    Ok(())
+}

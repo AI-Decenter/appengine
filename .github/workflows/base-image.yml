@@ -41,13 +41,6 @@ jobs:
           echo "date=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
           echo "owner_lc=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
 
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Compute tags and labels
         id: meta
         uses: docker/metadata-action@v5
@@ -62,33 +55,45 @@ jobs:
             org.opencontainers.image.title=aether-nodejs:${{ env.IMAGE_TAG }}
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
 
-      - name: Build and push image
-        id: build
+      - name: Build local image (amd64) for scanning
+        id: build_local
         uses: docker/build-push-action@v6
         with:
           context: images/aether-nodejs/20-slim
           file: images/aether-nodejs/20-slim/Dockerfile
-          push: true
-          platforms: linux/amd64,linux/arm64
-          tags: ${{ steps.meta.outputs.tags }}
+          push: false
+          load: true
+          platforms: linux/amd64
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}-ci
           labels: ${{ steps.meta.outputs.labels }}
 
       - name: Generate SBOM (CycloneDX)
         uses: anchore/sbom-action@v0
         with:
-          image: ghcr.io/${{ steps.prep.outputs.owner_lc }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+          image: ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}-ci
           artifact-name: sbom-${{ env.IMAGE_NAME }}-${{ env.IMAGE_TAG }}.cdx.json
           format: cyclonedx-json
 
-      - name: Trivy scan (image)
+      - name: Trivy scan (SARIF, non-blocking)
         uses: aquasecurity/trivy-action@0.27.0
         with:
-          image-ref: ghcr.io/${{ steps.prep.outputs.owner_lc }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+          image-ref: ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}-ci
           format: sarif
           output: trivy-results.sarif
-          severity: CRITICAL
-          exit-code: '1'
+          severity: CRITICAL,HIGH,MEDIUM,LOW,UNKNOWN
+          exit-code: '0'
           ignore-unfixed: true
+
+      - name: Trivy scan (JSON summary for gating)
+        id: trivy_json
+        run: |
+          trivy image --format json --output trivy-results.json --severity CRITICAL --ignore-unfixed ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}-ci || true
+          CRIT=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL")] | length' trivy-results.json)
+          echo "critical_count=$CRIT" >> $GITHUB_OUTPUT
+          echo "Critical vulnerabilities: $CRIT"
+          # Save a minimal summary too
+          jq '{critical: [ .Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL") ] | length }' trivy-results.json > trivy-summary.json
 
       - name: Upload Trivy results to code scanning
         if: always()
@@ -103,7 +108,7 @@ jobs:
         id: grype
         uses: anchore/scan-action@v3
         with:
-          image: ghcr.io/${{ steps.prep.outputs.owner_lc }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+          image: ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}-ci
           severity-cutoff: high
 
       - name: Upload Grype SARIF
@@ -120,7 +125,36 @@ jobs:
           path: |
             sbom-*.json
             trivy-results.sarif
+            trivy-results.json
+            trivy-summary.json
             ${{ steps.grype.outputs.sarif }}
+
+      - name: Enforce 0 CRITICAL vulnerabilities
+        run: |
+          if [ "${{ steps.trivy_json.outputs.critical_count }}" != "0" ]; then
+            echo "Found ${{ steps.trivy_json.outputs.critical_count }} CRITICAL vulnerabilities. Failing."
+            exit 1
+          fi
+
+      - name: Log in to GHCR
+        if: success()
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push multi-arch image
+        if: success()
+        id: build_push
+        uses: docker/build-push-action@v6
+        with:
+          context: images/aether-nodejs/20-slim
+          file: images/aether-nodejs/20-slim/Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
 
       - name: Install cosign (optional)
         if: ${{ github.event_name != 'pull_request' }}
@@ -128,8 +162,8 @@ jobs:
 
         
       - name: Sign image with cosign (keyless, optional)
-        if: ${{ github.event_name != 'pull_request' }}
+        if: ${{ github.event_name != 'pull_request' && success() }}
         env:
           COSIGN_EXPERIMENTAL: '1'
         run: |
-          cosign sign --yes ghcr.io/${{ steps.prep.outputs.owner_lc }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }} || echo "cosign signing skipped/failed"
+          cosign sign --yes ghcr.io/${{ steps.prep.outputs.owner_lc }}/${{ env.IMAGE_NAME }}@${{ steps.build_push.outputs.digest }} || echo "cosign signing skipped/failed"
