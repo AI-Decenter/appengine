@@ -167,7 +167,8 @@ impl StorageManager {
     pub async fn from_env() -> Self {
         let mode = std::env::var("AETHER_STORAGE_MODE").unwrap_or_else(|_| "mock".into());
         let bucket = std::env::var("AETHER_ARTIFACT_BUCKET").unwrap_or_else(|_| "artifacts".into());
-        let base_url = std::env::var("AETHER_S3_BASE_URL").unwrap_or_else(|_| "http://minio.local:9000".into());
+        // Default to localhost to avoid DNS assumptions like minio.local in most environments
+        let base_url = std::env::var("AETHER_S3_BASE_URL").unwrap_or_else(|_| "http://localhost:9000".into());
         if mode.eq_ignore_ascii_case("s3") {
             #[cfg(feature="s3")]
             {
@@ -175,7 +176,10 @@ impl StorageManager {
                 let region = std::env::var("AWS_REGION").unwrap_or_else(|_| "us-east-1".into());
                 let shared = aws_config::defaults(BehaviorVersion::latest()).region(aws_sdk_s3::config::Region::new(region.clone())).load().await;
                 let mut builder = aws_sdk_s3::config::Builder::from(&shared);
-                if let Ok(ep) = std::env::var("AETHER_S3_ENDPOINT_URL") { builder = builder.endpoint_url(ep); }
+                if let Ok(ep) = std::env::var("AETHER_S3_ENDPOINT_URL") {
+                    // Use the provided endpoint (e.g., MinIO) and prefer path-style addressing for compatibility
+                    builder = builder.endpoint_url(ep).force_path_style(true);
+                }
                 let conf = builder.build();
                 let client = aws_sdk_s3::Client::from_conf(conf);
                 info!(bucket=%bucket, "storage_manager.init_s3");
