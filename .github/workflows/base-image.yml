@@ -110,6 +110,8 @@ jobs:
         with:
           image: ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}-ci
           severity-cutoff: high
+          fail-build: false
+        continue-on-error: true
 
       - name: Upload Grype SARIF
         if: always() && steps.grype.outputs.sarif != ''

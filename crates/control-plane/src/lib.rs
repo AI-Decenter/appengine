@@ -293,7 +293,7 @@ mod tests {
     std::env::set_var("AETHER_MOCK_LOGS","1");
     let pool = crate::test_support::test_pool().await;
     let app = build_router(AppState { db: pool });
-        let res = app.oneshot(Request::builder().uri("/apps/demo/logs").body(Body::empty()).unwrap()).await.unwrap();
+    let res = app.oneshot(Request::builder().uri("/apps/demo/logs?mock=true").body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let ct = res.headers().get("content-type").unwrap().to_str().unwrap();
         assert!(ct.starts_with("application/x-ndjson"));
@@ -306,7 +306,7 @@ mod tests {
         std::env::set_var("AETHER_MOCK_LOGS","1");
         let pool = crate::test_support::test_pool().await;
         let app = build_router(AppState { db: pool });
-        let res = app.oneshot(Request::builder().uri("/apps/app1/logs?tail_lines=3").body(Body::empty()).unwrap()).await.unwrap();
+    let res = app.oneshot(Request::builder().uri("/apps/app1/logs?tail_lines=3&mock=true").body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let ct = res.headers().get("content-type").unwrap().to_str().unwrap();
         assert!(ct.starts_with("application/x-ndjson"));
@@ -324,7 +324,7 @@ mod tests {
         std::env::set_var("AETHER_MOCK_LOGS","1");
         let pool = crate::test_support::test_pool().await;
         let app = build_router(AppState { db: pool });
-        let res = app.oneshot(Request::builder().uri("/apps/app1/logs?tail_lines=2&format=text").body(Body::empty()).unwrap()).await.unwrap();
+    let res = app.oneshot(Request::builder().uri("/apps/app1/logs?tail_lines=2&format=text&mock=true").body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let ct = res.headers().get("content-type").unwrap().to_str().unwrap();
         assert!(ct.starts_with("text/plain"));
@@ -341,7 +341,7 @@ mod tests {
         std::env::set_var("AETHER_MOCK_LOGS_MULTI","1");
         let pool = crate::test_support::test_pool().await;
         let app = build_router(AppState { db: pool });
-        let res = app.oneshot(Request::builder().uri("/apps/app2/logs?tail_lines=1").body(Body::empty()).unwrap()).await.unwrap();
+    let res = app.oneshot(Request::builder().uri("/apps/app2/logs?tail_lines=1&mock=true").body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let body = axum::body::to_bytes(res.into_body(), 10_000).await.unwrap();
         let s = String::from_utf8(body.to_vec()).unwrap();
