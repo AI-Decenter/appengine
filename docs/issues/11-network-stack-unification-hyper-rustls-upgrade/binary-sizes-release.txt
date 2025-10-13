@@ -1,4 +1,4 @@
 [measure] Binary sizes:
-aether-cli: 13482128 bytes
-control-plane: 23521472 bytes
-aether-operator: 10198008 bytes
+aether-cli: 13382232 bytes
+control-plane: 21496256 bytes
+aether-operator: 8102760 bytes
