@@ -4,7 +4,8 @@ members = [
   "crates/control-plane",
   "crates/operator",
   "crates/json-extract",
-  "crates/ed25519-verify"
+  "crates/ed25519-verify",
+  "crates/helm-rbac-tests"
 ]
 resolver = "2"
 

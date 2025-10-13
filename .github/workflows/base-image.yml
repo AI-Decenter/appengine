@@ -1,0 +1,135 @@
+name: Base image
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'images/aether-nodejs/**'
+      - '.github/workflows/base-image.yml'
+      - 'Makefile'
+  workflow_dispatch: {}
+  schedule:
+    - cron: '0 0 1 * *' # monthly rebuilds
+
+permissions:
+  contents: read
+  packages: write
+  security-events: write
+  id-token: write # for cosign keyless signing
+
+env:
+  IMAGE_NAME: aether-nodejs
+  IMAGE_TAG: 20-slim
+  REGISTRY: ghcr.io
+
+jobs:
+  build-publish-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Compute date tag and owner (lowercase)
+        id: prep
+        run: |
+          echo "date=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+          echo "owner_lc=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute tags and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ghcr.io/${{ steps.prep.outputs.owner_lc }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ env.IMAGE_TAG }}
+            type=raw,value=${{ env.IMAGE_TAG }}-${{ steps.prep.outputs.date }}
+            type=sha
+          labels: |
+            org.opencontainers.image.title=aether-nodejs:${{ env.IMAGE_TAG }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+
+      - name: Build and push image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: images/aether-nodejs/20-slim
+          file: images/aether-nodejs/20-slim/Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Generate SBOM (CycloneDX)
+        uses: anchore/sbom-action@v0
+        with:
+          image: ghcr.io/${{ steps.prep.outputs.owner_lc }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+          artifact-name: sbom-${{ env.IMAGE_NAME }}-${{ env.IMAGE_TAG }}.cdx.json
+          format: cyclonedx-json
+
+      - name: Trivy scan (image)
+        uses: aquasecurity/trivy-action@0.27.0
+        with:
+          image-ref: ghcr.io/${{ steps.prep.outputs.owner_lc }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL
+          exit-code: '1'
+          ignore-unfixed: true
+
+      - name: Upload Trivy results to code scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif
+
+      - name: Install grype
+        uses: anchore/scan-action/download-grype@v3
+
+      - name: Grype scan (image)
+        id: grype
+        uses: anchore/scan-action@v3
+        with:
+          image: ghcr.io/${{ steps.prep.outputs.owner_lc }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+          severity-cutoff: high
+
+      - name: Upload Grype SARIF
+        if: always() && steps.grype.outputs.sarif != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: ${{ steps.grype.outputs.sarif }}
+
+      - name: Attach artifacts (SBOM and scans)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: base-image-artifacts
+          path: |
+            sbom-*.json
+            trivy-results.sarif
+            ${{ steps.grype.outputs.sarif }}
+
+      - name: Install cosign (optional)
+        if: ${{ github.event_name != 'pull_request' }}
+        uses: sigstore/cosign-installer@v3
+
+        
+      - name: Sign image with cosign (keyless, optional)
+        if: ${{ github.event_name != 'pull_request' }}
+        env:
+          COSIGN_EXPERIMENTAL: '1'
+        run: |
+          cosign sign --yes ghcr.io/${{ steps.prep.outputs.owner_lc }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }} || echo "cosign signing skipped/failed"

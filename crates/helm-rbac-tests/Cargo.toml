@@ -1,0 +1,20 @@
+[package]
+name = "helm-rbac-tests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dev-dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+walkdir = "2"
+regex = "1"
+ glob = "0.3"
+
+[lib]
+path = "src/lib.rs"
+
+[[test]]
+name = "helm_rbac"
+path = "tests/helm_rbac.rs"

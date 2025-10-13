@@ -299,6 +299,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn app_logs_mock_json_default() {
+        std::env::set_var("AETHER_MOCK_LOGS","1");
+        let pool = crate::test_support::test_pool().await;
+        let app = build_router(AppState { db: pool });
+        let res = app.oneshot(Request::builder().uri("/apps/app1/logs?tail_lines=3").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let ct = res.headers().get("content-type").unwrap().to_str().unwrap();
+        assert!(ct.starts_with("application/x-ndjson"));
+        let body = axum::body::to_bytes(res.into_body(), 10_000).await.unwrap();
+        let s = String::from_utf8(body.to_vec()).unwrap();
+        let lines: Vec<&str> = s.lines().collect();
+        assert_eq!(lines.len(), 3);
+        let v: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(v["app"], "app1");
+        assert_eq!(v["pod"], "pod-a");
+    }
+
+    #[tokio::test]
+    async fn app_logs_mock_text_format() {
+        std::env::set_var("AETHER_MOCK_LOGS","1");
+        let pool = crate::test_support::test_pool().await;
+        let app = build_router(AppState { db: pool });
+        let res = app.oneshot(Request::builder().uri("/apps/app1/logs?tail_lines=2&format=text").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let ct = res.headers().get("content-type").unwrap().to_str().unwrap();
+        assert!(ct.starts_with("text/plain"));
+        let body = axum::body::to_bytes(res.into_body(), 10_000).await.unwrap();
+        let s = String::from_utf8(body.to_vec()).unwrap();
+        let lines: Vec<&str> = s.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("pod-a"));
+    }
+
+    #[tokio::test]
+    async fn app_logs_mock_multi_pod() {
+        std::env::set_var("AETHER_MOCK_LOGS","1");
+        std::env::set_var("AETHER_MOCK_LOGS_MULTI","1");
+        let pool = crate::test_support::test_pool().await;
+        let app = build_router(AppState { db: pool });
+        let res = app.oneshot(Request::builder().uri("/apps/app2/logs?tail_lines=1").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(res.into_body(), 10_000).await.unwrap();
+        let s = String::from_utf8(body.to_vec()).unwrap();
+        let lines: Vec<&str> = s.lines().collect();
+        // follow=false with tail=1 stops after first line across multi-pod loop (deterministic)
+        assert_eq!(lines.len(), 1);
+    }
+
+    #[tokio::test]
     async fn readiness_ok() {
     let pool = crate::test_support::test_pool().await;
     let app = build_router(AppState { db: pool });

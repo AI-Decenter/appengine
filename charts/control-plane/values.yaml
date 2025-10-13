@@ -1,0 +1,48 @@
+image:
+  repository: ghcr.io/internal/aether/control-plane
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+service:
+  type: ClusterIP
+  port: 80
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+env:
+  RUST_LOG: info
+  DATABASE_URL: null # provide via existing secret or values.secret
+  TOKENS: "" # comma-separated tokens: token:role:user
+
+secret:
+  create: false
+  name: aether-postgres
+  keys:
+    url: url
+
+serviceAccount:
+  create: true
+  name: aether-dev-hot
+
+rbac:
+  create: true
+  namespace: ""
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: aether.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
