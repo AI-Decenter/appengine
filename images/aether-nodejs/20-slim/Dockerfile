@@ -13,6 +13,9 @@ LABEL org.opencontainers.image.title="aether-nodejs:20-slim" \
 # Install only what we need; ensure CA certs are present and up to date
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates dumb-init && apt-get upgrade -y && update-ca-certificates && rm -rf /var/lib/apt/lists/*
 
+# Keep Node toolchain up to date (mitigate npm advisories)
+RUN npm install -g npm@latest && npm cache clean --force
+
 # Create app directory owned by node user (node user exists in base image)
 WORKDIR /home/node/app
 
