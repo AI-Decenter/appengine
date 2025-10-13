@@ -148,13 +148,12 @@ jobs:
       - name: Network stack regression check
         run: |
           bash scripts/check-network-stack.sh
-      - name: Cargo Deny (bans)
-        uses: EmbarkStudios/cargo-deny-action@v1
-        env:
-          # Running inside the action's container; do not wrap rustc
-          RUSTC_WRAPPER: ""
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
         with:
-          command: check bans
+          tool: cargo-deny
+      - name: Cargo Deny (bans)
+        run: cargo deny check bans
       - name: Focused exit code tests
         run: cargo test -p aether-cli --test exit_codes -- --nocapture
       - name: Build release aether-cli
