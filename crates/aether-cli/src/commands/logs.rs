@@ -45,24 +45,24 @@ mod tests {
 	use super::*;
 	#[tokio::test]
 	async fn builds_logs_url_and_streams() {
-		// Spin up a tiny hyper server that returns two lines
-		use hyper::{Server, Body, Request, Response, Method};
-		use std::net::SocketAddr;
-		let make_svc = hyper::service::make_service_fn(|_conn| async move {
-			Ok::<_, hyper::Error>(hyper::service::service_fn(|req: Request<Body>| async move {
-				if req.method()==Method::GET && req.uri().path().starts_with("/apps/demo/logs") {
-					let mut resp = Response::new(Body::from("line1\nline2\n"));
-					resp.headers_mut().insert(hyper::header::CONTENT_TYPE, hyper::header::HeaderValue::from_static("text/plain"));
-					Ok::<_, hyper::Error>(resp)
-				} else { Ok::<_, hyper::Error>(Response::new(Body::empty())) }
-			}))
-		});
-		let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-		let server = Server::try_bind(&addr).unwrap().serve(make_svc);
-		let port = server.local_addr().port();
-		tokio::spawn(server);
+		// Tiny axum server compatible with hyper 1.x
+		use axum::{routing::get, Router, response::IntoResponse};
+		use axum::http::header::{CONTENT_TYPE, HeaderValue};
+		use tokio::net::TcpListener;
 
-		std::env::set_var("AETHER_API_BASE", format!("http://127.0.0.1:{}", port));
+		async fn logs_handler() -> impl IntoResponse {
+			let body = "line1\nline2\n";
+			let mut resp = axum::response::Response::new(axum::body::Body::from(body));
+			resp.headers_mut().insert(CONTENT_TYPE, HeaderValue::from_static("text/plain"));
+			resp
+		}
+
+		let app = Router::new().route("/apps/demo/logs", get(logs_handler));
+		let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+		let addr = listener.local_addr().unwrap();
+		tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+		std::env::set_var("AETHER_API_BASE", format!("http://{}:{}", addr.ip(), addr.port()));
 		std::env::set_var("AETHER_LOGS_FOLLOW", "0");
 		let res = handle(Some("demo".into())).await;
 		assert!(res.is_ok());
