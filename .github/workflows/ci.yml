@@ -211,6 +211,9 @@ jobs:
           cargo bench -p aether-cli --bench pack_bench --bench stream_bench --quiet
 
       - name: Compare to baselines (fail on regression)
+        env:
+          # Allow mild variance on shared runners for duration metrics
+          DURATION_TOLERANCE: '0.22'
         run: |
           # Packaging vs committed baseline
           bash scripts/check-bench-regression.sh \

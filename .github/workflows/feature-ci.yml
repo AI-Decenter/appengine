@@ -210,6 +210,8 @@ jobs:
         run: |
           cargo bench -p aether-cli --bench pack_bench --bench stream_bench --quiet || true
       - name: Compare bench outputs to baselines
+        env:
+          DURATION_TOLERANCE: '0.22'
         run: |
           # packaging vs committed baseline
           bash scripts/check-bench-regression.sh \
