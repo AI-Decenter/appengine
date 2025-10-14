@@ -154,14 +154,22 @@ pub async fn auth_middleware(mut req: Request, next: Next, store: Arc<AuthStore>
 
 // Route-level RBAC guard; min_role enforced if auth is enabled; otherwise pass-through
 pub async fn require_role(req: Request, next: Next, store: Arc<AuthStore>, min_role: Role) -> Result<axum::response::Response, axum::response::Response> {
-	if !is_auth_enabled(&store) { return Ok(next.run(req).await); }
-	if let Some(ctx) = req.extensions().get::<UserContext>() {
-		if ctx.role.allows(min_role) { return Ok(next.run(req).await); }
-		info!(user_role=%ctx.role.as_str(), user_name=%ctx.name.as_deref().unwrap_or("-"), auth_result="forbidden", "auth.rbac");
-		return Err(axum::response::Response::builder().status(StatusCode::FORBIDDEN).body(axum::body::Body::empty()).unwrap());
+	if !is_auth_enabled(&store) {
+		return Ok(next.run(req).await);
 	}
-	warn!("auth.unauthorized.missing_context");
-	Err(axum::response::Response::builder().status(StatusCode::UNAUTHORIZED).body(axum::body::Body::empty()).unwrap())
+	if let Some(ctx) = req.extensions().get::<UserContext>() {
+		if ctx.role.allows(min_role) {
+			return Ok(next.run(req).await);
+		} else {
+			// Valid token, but insufficient scope
+			info!(user_role=%ctx.role.as_str(), user_name=%ctx.name.as_deref().unwrap_or("-"), auth_result="forbidden", "auth.rbac");
+			return Err(axum::response::Response::builder().status(StatusCode::FORBIDDEN).body(axum::body::Body::empty()).unwrap());
+		}
+	} else {
+		// No valid token/context
+		warn!("auth.unauthorized.missing_context");
+		return Err(axum::response::Response::builder().status(StatusCode::UNAUTHORIZED).body(axum::body::Body::empty()).unwrap());
+	}
 }
 
 // Note: layer builders are created inline via axum::middleware::from_fn_with_state in lib.rs

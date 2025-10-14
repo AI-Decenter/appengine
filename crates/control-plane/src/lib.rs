@@ -266,15 +266,16 @@ pub fn build_router(state: AppState) -> Router {
         .layer(admin_guard.clone())
         .layer(auth_layer.clone());
 
-    Router::new()
+    let mut router = Router::new()
         .merge(public)
         .merge(reads)
         .merge(writes)
         .route("/openapi.json", get(move || async move { axum::Json(openapi.clone()) }))
         .route("/swagger", get(swagger_ui))
         .layer(trace_layer_mw)
-        .apply_if(cors_layer.is_some(), |r| r.layer(cors_layer.unwrap()))
-        .with_state(state)
+        .with_state(state);
+    if let Some(layer) = cors_layer { router = router.layer(layer); }
+    router
 }
 
 #[cfg(test)]
