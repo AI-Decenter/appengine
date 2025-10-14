@@ -145,6 +145,21 @@ aether completions --shell bash > aether.bash
 aether deploy --format json --no-sbom --pack-only
 ```
 
+### E2E Smoke (Deploy + Metrics)
+
+Run a quick smoke flow to measure code→artifact→upload→(mock)rollout timings and produce JSON + Markdown summary:
+
+```
+# Dry-run locally (no cluster required)
+SMOKE_DRY_RUN=1 SMOKE_MARKDOWN_OUT=smoke-summary.md ./scripts/smoke_e2e.sh sample-node > smoke-report.json
+
+# Outputs:
+# - smoke-report.json (machine-readable metrics)
+# - smoke-summary.md  (human summary)
+```
+
+CI workflow `.github/workflows/e2e-smoke.yml` runs the dry-run and publishes artifacts.
+
 Configuration:
 * Config file: `${XDG_CONFIG_HOME:-~/.config}/aether/config.toml`
 * Session file: `${XDG_CACHE_HOME:-~/.cache}/aether/session.json`
