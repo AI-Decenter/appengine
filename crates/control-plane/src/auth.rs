@@ -110,18 +110,18 @@ pub async fn auth_middleware(mut req: Request, next: Next, store: Arc<AuthStore>
 	let Some(val) = req.headers().get(axum::http::header::AUTHORIZATION) else {
 		let c = UNAUTH_COUNT.fetch_add(1, Ordering::Relaxed);
 	if c.is_multiple_of(10) { warn!("auth.unauthorized.missing_header"); }
-		return Err(axum::response::Response::builder().status(StatusCode::UNAUTHORIZED).body(axum::body::Body::empty()).unwrap());
+		Err(axum::response::Response::builder().status(StatusCode::UNAUTHORIZED).body(axum::body::Body::empty()).unwrap())
 	};
 	let Ok(hdr) = val.to_str() else {
 		let c = UNAUTH_COUNT.fetch_add(1, Ordering::Relaxed);
 	if c.is_multiple_of(10) { warn!("auth.unauthorized.bad_header"); }
-		return Err(axum::response::Response::builder().status(StatusCode::UNAUTHORIZED).body(axum::body::Body::empty()).unwrap());
+		Err(axum::response::Response::builder().status(StatusCode::UNAUTHORIZED).body(axum::body::Body::empty()).unwrap())
 	};
 	let prefix = "Bearer ";
 	if !hdr.starts_with(prefix) {
 		let c = UNAUTH_COUNT.fetch_add(1, Ordering::Relaxed);
 	if c.is_multiple_of(10) { warn!("auth.unauthorized.bad_schema"); }
-		return Err(axum::response::Response::builder().status(StatusCode::UNAUTHORIZED).body(axum::body::Body::empty()).unwrap());
+		Err(axum::response::Response::builder().status(StatusCode::UNAUTHORIZED).body(axum::body::Body::empty()).unwrap())
 	}
 	let token = &hdr[prefix.len()..];
 	// Hash the token and lookup
@@ -133,7 +133,7 @@ pub async fn auth_middleware(mut req: Request, next: Next, store: Arc<AuthStore>
 	if let Some(info) = store.by_hash.get(&arr) {
 		// Constant-time confirmation (redundant as hash-length fixed, but good practice)
 		if !ct_eq(&arr, &info.token_hash) {
-			return Err(axum::response::Response::builder().status(StatusCode::UNAUTHORIZED).body(axum::body::Body::empty()).unwrap());
+			Err(axum::response::Response::builder().status(StatusCode::UNAUTHORIZED).body(axum::body::Body::empty()).unwrap())
 		}
 	// Create stable user_id from sha256(token) first 16 bytes
 	let hash = Sha256::digest(token.as_bytes());
@@ -157,20 +157,20 @@ pub async fn auth_middleware(mut req: Request, next: Next, store: Arc<AuthStore>
 // Route-level RBAC guard; min_role enforced if auth is enabled; otherwise pass-through
 pub async fn require_role(req: Request, next: Next, store: Arc<AuthStore>, min_role: Role) -> Result<axum::response::Response, axum::response::Response> {
 	if !is_auth_enabled(&store) {
-		return Ok(next.run(req).await);
+		Ok(next.run(req).await)
 	}
 	if let Some(ctx) = req.extensions().get::<UserContext>() {
 		if ctx.role.allows(min_role) {
-			return Ok(next.run(req).await);
+			Ok(next.run(req).await)
 		} else {
 			// Valid token, but insufficient scope
 			info!(user_role=%ctx.role.as_str(), user_name=%ctx.name.as_deref().unwrap_or("-"), auth_result="forbidden", "auth.rbac");
-			return Err(axum::response::Response::builder().status(StatusCode::FORBIDDEN).body(axum::body::Body::empty()).unwrap());
+			Err(axum::response::Response::builder().status(StatusCode::FORBIDDEN).body(axum::body::Body::empty()).unwrap())
 		}
 	} else {
 		// No valid token/context
 		warn!("auth.unauthorized.missing_context");
-		return Err(axum::response::Response::builder().status(StatusCode::UNAUTHORIZED).body(axum::body::Body::empty()).unwrap());
+		Err(axum::response::Response::builder().status(StatusCode::UNAUTHORIZED).body(axum::body::Body::empty()).unwrap())
 	}
 }
 

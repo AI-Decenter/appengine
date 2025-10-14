@@ -6,9 +6,9 @@ Summary
 Provide clear operator documentation and troubleshooting runbook.
 
 Tasks
-- [ ] I1 Operator guide
+- [x] I1 Operator guide
   - Install, configure MinIO/Postgres, deploy sample
-- [ ] I2 Troubleshooting playbook
+- [x] I2 Troubleshooting playbook
   - Common failures (quotas, retention, SSE, DB, S3)
 
 Dependencies
@@ -16,6 +16,13 @@ Dependencies
 
 DoD
 - Docs reviewed; linked from README and STATUS; versioned with sprint tags
+
+Artifacts
+- Operator Guide: `docs/operator-guide.md`
+- Troubleshooting: `docs/troubleshooting.md`
+
+Test
+- `tests/epic_i_test.sh` asserts docs presence and cross-links.
 
 References
 - ../../SPRINT_PLAN.md (Epic I)

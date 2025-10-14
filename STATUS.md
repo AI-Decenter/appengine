@@ -4,11 +4,8 @@ Cập nhật ngày: 2025-10-13 — Nhánh hiện tại: feat/complete-aether-eng
 
 ## 1) Tóm tắt nhanh và % hoàn thành
 
-- Mục tiêu MVP: PaaS nội bộ cho Node.js, build phía client (CLI), artifact upload (S3/MinIO), Control Plane (Axum + SQLx + Postgres), Data Plane (K8s) với init/sidecar tải artifact và chạy Node.
-- Đánh giá tổng thể: ~75–80% hoàn thành.
   - Kỹ thuật: ~75–80% — CLI và Control Plane gần như đủ, S3 presign/two-phase/multipart, K8s apply (có dev-hot). Thiếu log streaming thực chiến, chart/SA/RBAC hoàn chỉnh, operator mới CRD.
-  - Sản phẩm: ~70–80% — Luồng code → deploy hoạt động (CLI deploy + Control Plane APIs). Cần base image chính thức, Helm/K8s manifests đầy đủ, “logs” end-to-end.
-  - Kinh doanh: ~50–60% — Bench packaging/streaming có sẵn nhưng chưa có số liệu E2E thực tế chứng minh ≥80% giảm thời gian deploy.
+  - Operator guide and troubleshooting runbook are available and linked from README.
 
 ## 2) Kiến trúc đã triển khai
 

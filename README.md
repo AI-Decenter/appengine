@@ -194,6 +194,11 @@ When invoking `aether deploy --format json`, the CLI prints a single JSON object
 
 Error Behavior (JSON mode): currently non‑zero failures may still emit human readable text before JSON; future work will standardize an error envelope `{ "error": { code, message } }` (tracked in Issue 01 follow-up – now resolved in this branch by suppressing SBOM generation when skipped).
 
+## Operator docs and runbooks
+
+- Operator Guide: `docs/operator-guide.md`
+- Troubleshooting: `docs/troubleshooting.md`
+
 ### 3.3 SBOM and Provenance Controls
 
 - Default SBOM format: CycloneDX 1.5 JSON. Pass `--legacy-sbom` to emit the internal legacy format instead (schema `aether-sbom-v1`).
