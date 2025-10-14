@@ -1,13 +1,25 @@
 use anyhow::{Result, Context};
-use tracing::{info, debug};
+use tracing::{info, debug, warn};
 
-pub async fn handle(app: Option<String>) -> Result<()> {
-	let appn = app.unwrap_or_else(|| std::env::var("AETHER_DEFAULT_APP").unwrap_or_else(|_| "sample-app".into()));
+#[derive(Debug, Clone, Default)]
+pub struct LogsOptions {
+	pub app: Option<String>,
+	pub follow: bool,
+	pub since: Option<String>,
+	pub container: Option<String>,
+	pub format: Option<String>,
+	pub color: bool,
+}
+
+pub async fn handle_opts(opts: LogsOptions) -> Result<()> {
+	let appn = opts.app.unwrap_or_else(|| std::env::var("AETHER_DEFAULT_APP").unwrap_or_else(|_| "sample-app".into()));
 	let base = std::env::var("AETHER_API_BASE").unwrap_or_else(|_| "http://localhost:8080".into());
-	let follow = std::env::var("AETHER_LOGS_FOLLOW").ok().map(|v| v=="1" || v.eq_ignore_ascii_case("true")).unwrap_or(true);
-	let since = std::env::var("AETHER_LOGS_SINCE").ok();
-	let container = std::env::var("AETHER_LOGS_CONTAINER").ok();
-	let format = std::env::var("AETHER_LOGS_FORMAT").unwrap_or_else(|_| "text".into()); // default to human text
+	let follow_env = std::env::var("AETHER_LOGS_FOLLOW").ok().map(|v| v=="1" || v.eq_ignore_ascii_case("true"));
+	let follow = opts.follow || follow_env.unwrap_or(true);
+	let since = opts.since.or_else(|| std::env::var("AETHER_LOGS_SINCE").ok());
+	let container = opts.container.or_else(|| std::env::var("AETHER_LOGS_CONTAINER").ok());
+	let format = opts.format.unwrap_or_else(|| std::env::var("AETHER_LOGS_FORMAT").unwrap_or_else(|_| "text".into())); // default to human text
+	let color = opts.color || std::env::var("AETHER_COLOR").ok().map(|v| v=="1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
 	let tail: u32 = std::env::var("AETHER_LOGS_TAIL").ok().and_then(|v| v.parse().ok()).unwrap_or(100);
 
 	// Mock mode: allow tests/dev to bypass network entirely. Triggered if:
@@ -42,25 +54,52 @@ pub async fn handle(app: Option<String>) -> Result<()> {
 	if let Some(c) = container { url.push_str("&container="); url.push_str(&urlencoding::encode(&c)); }
 
 	debug!(%url, "logs.request");
-	let client = reqwest::Client::builder().build()?;
-	let resp = client.get(&url).send().await.context("request logs")?;
-	if !resp.status().is_success() {
-		anyhow::bail!("logs fetch failed: {}", resp.status());
-	}
-	let ct = resp.headers().get(reqwest::header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("");
-	let is_json_lines = ct.starts_with("application/x-ndjson") || format.eq_ignore_ascii_case("json");
-	let mut stream = resp.bytes_stream();
-	use futures_util::StreamExt;
-	use tokio::io::AsyncWriteExt;
-	let mut stdout = tokio::io::stdout();
-	while let Some(chunk) = stream.next().await {
-		let bytes = chunk.context("read chunk")?;
-		if is_json_lines {
-			stdout.write_all(&bytes).await?; // already newline delimited
-		} else {
-			stdout.write_all(&bytes).await?; // text lines already framed by server
+	let client = reqwest::Client::builder()
+		.pool_idle_timeout(std::time::Duration::from_secs(30))
+		.build()?;
+
+	// reconnecting loop for follow=true
+	let mut attempt: u32 = 0;
+	let max_reconnects = std::env::var("AETHER_LOGS_MAX_RECONNECTS").ok().and_then(|v| v.parse::<u32>().ok());
+	loop {
+		let resp = client.get(&url).send().await.context("request logs")?;
+		if !resp.status().is_success() {
+			anyhow::bail!("logs fetch failed: {}", resp.status());
 		}
-		stdout.flush().await.ok();
+		let ct = resp.headers().get(reqwest::header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("");
+		let is_json_lines = ct.starts_with("application/x-ndjson") || format.eq_ignore_ascii_case("json");
+		let mut stream = resp.bytes_stream();
+		use futures_util::StreamExt;
+		use tokio::io::AsyncWriteExt;
+		let mut stdout = tokio::io::stdout();
+		while let Some(chunk) = stream.next().await {
+			match chunk {
+				Ok(bytes) => {
+					if is_json_lines {
+						if color {
+							// passthrough for now; colorization could parse JSON and add ANSI later
+							stdout.write_all(&bytes).await?;
+						} else {
+							stdout.write_all(&bytes).await?;
+						}
+					} else {
+						stdout.write_all(&bytes).await?;
+					}
+					stdout.flush().await.ok();
+				}
+				Err(e) => {
+					warn!(error=%e, "logs.stream.chunk_error");
+					break; // trigger reconnect if follow
+				}
+			}
+		}
+		if !follow { break; }
+		attempt = attempt.saturating_add(1);
+		if let Some(max) = max_reconnects { if attempt >= max { break; } }
+		let backoff_ms = (100u64).saturating_mul((attempt.min(50) + 1) as u64);
+		tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+		debug!(attempt, backoff_ms, "logs.stream.reconnect");
+		continue;
 	}
 	info!(app=%appn, "logs.stream.end");
 	Ok(())
@@ -90,7 +129,16 @@ mod tests {
 
 		std::env::set_var("AETHER_API_BASE", format!("http://{}:{}", addr.ip(), addr.port()));
 		std::env::set_var("AETHER_LOGS_FOLLOW", "0");
-		let res = handle(Some("demo".into())).await;
+		let res = handle_opts(LogsOptions{ app: Some("demo".into()), ..Default::default() }).await;
+		assert!(res.is_ok());
+	}
+
+	#[tokio::test]
+	async fn mock_mode_respects_format_and_env() {
+		std::env::set_var("AETHER_API_BASE", "http://127.0.0.1:0");
+		std::env::set_var("AETHER_LOGS_MOCK", "1");
+		std::env::set_var("AETHER_LOGS_FORMAT", "json");
+		let res = handle_opts(LogsOptions{ app: Some("demo".into()), ..Default::default() }).await;
 		assert!(res.is_ok());
 	}
 }

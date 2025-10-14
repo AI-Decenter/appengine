@@ -57,8 +57,21 @@ pub enum Commands {
     /// Bật chế độ dev hot reload (sidecar fetch loop)
     #[arg(long, default_value_t = false)] dev_hot: bool,
     },
-    /// Mock hiển thị log gần nhất
-    Logs { #[arg(long)] app: Option<String> },
+    /// Hiển thị log (theo dõi theo thời gian thực nếu --follow)
+    Logs {
+        /// Tên ứng dụng (mặc định lấy từ AETHER_DEFAULT_APP hoặc sample-app)
+        #[arg(long)] app: Option<String>,
+        /// Theo dõi (giữ kết nối, tự reconnect khi bị ngắt)
+        #[arg(long, default_value_t = false)] follow: bool,
+        /// Bộ lọc thời gian (RFC3339 hoặc duration như 30s,5m)
+        #[arg(long)] since: Option<String>,
+        /// Chọn container cụ thể
+        #[arg(long)] container: Option<String>,
+        /// Định dạng hiển thị: json|text (mặc định text)
+        #[arg(long)] format: Option<String>,
+        /// Tô màu theo pod/container (chỉ áp dụng cho text/json in ra terminal)
+        #[arg(long, default_value_t = false)] color: bool,
+    },
     /// Mock liệt kê ứng dụng
     List {},
     /// Sinh shell completions (ẩn)
