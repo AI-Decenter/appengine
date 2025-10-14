@@ -51,8 +51,8 @@ pub async fn handle(opts: DeployOptions) -> Result<()> {
     let DeployOptions { dry_run, pack_only, compression_level, out, no_upload, no_cache, no_sbom, legacy_sbom, cyclonedx, format, use_legacy_upload, dev_hot } = opts;
     let root = Path::new(".");
     if !is_node_project(root) { return Err(CliError::new(CliErrorKind::Usage("not a NodeJS project (missing package.json)".into())).into()); }
-    // Effective SBOM mode: CycloneDX by default unless legacy_sbom is set, or explicitly force via --cyclonedx
-    let use_cyclonedx = (!legacy_sbom) || cyclonedx;
+    // Effective SBOM mode: Legacy by default; use CycloneDX only if explicitly requested and not forced legacy
+    let use_cyclonedx = if legacy_sbom { false } else { cyclonedx };
     // In dry-run, we still simulate packaging and emit JSON with sbom/provenance paths for tests
     if dry_run {
         let digest = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
