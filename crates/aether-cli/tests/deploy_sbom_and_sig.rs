@@ -29,6 +29,9 @@ fn deploy_generates_sbom_and_signature_when_key_present() {
     let sig_content = fs::read_to_string(&sig).unwrap();
     assert_eq!(sig_content.len(), 128, "ed25519 signature hex length");
     let sbom_content = fs::read_to_string(&sbom).unwrap();
-    assert!(sbom_content.contains("\"schema\":"));
+    // Accept either legacy (schema field) or CycloneDX (bomFormat)
+    let has_legacy_schema = sbom_content.contains("\"schema\":");
+    let has_cyclonedx = sbom_content.contains("\"bomFormat\": \"CycloneDX\"");
+    assert!(has_legacy_schema || has_cyclonedx, "SBOM should be legacy or CycloneDX format");
     assert!(sbom_content.contains("demo"));
 }
