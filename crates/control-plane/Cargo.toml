@@ -49,6 +49,7 @@ s3 = ["aws-config", "aws-sdk-s3"]
 sqlite-test = []
 mock-kube = []
 dev-hot-ingest = []
+logs-ws = ["axum/ws"]
 
 [dev-dependencies]
 proptest = "1"

@@ -196,9 +196,15 @@ pub fn build_router(state: AppState) -> Router {
         .route("/metrics", get(metrics_handler));
 
     // Read endpoints (auth-only)
-    let reads = Router::new()
+    let mut reads = Router::new()
         .route("/deployments", get(list_deployments))
-        .route("/deployments/:id", get(get_deployment))
+        .route("/deployments/:id", get(get_deployment));
+    // Optional WebSocket logs route
+    #[cfg(feature = "logs-ws")]
+    {
+        use axum::routing::get as get_ws;
+        reads = reads.route("/apps/:app_name/logs/ws", get_ws(handlers::apps::app_logs_ws));
+    }
         .route("/artifacts", get(list_artifacts))
         .route("/artifacts/:digest", axum::routing::head(head_artifact))
         .route("/artifacts/:digest/meta", get(handlers::uploads::artifact_meta))

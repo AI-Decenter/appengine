@@ -138,20 +138,19 @@ async fn build_test_pool(shared: bool) -> Pool<Postgres> {
             Ok(())
         }));
     // Connection with retry guards to mitigate transient startup races in CI
-    let mut pool: Option<Pool<Postgres>> = None;
     let max_retries: u32 = std::env::var("AETHER_TEST_DB_CONNECT_RETRIES").ok().and_then(|v| v.parse().ok()).unwrap_or_else(|| if std::env::var("CI").is_ok() { 8 } else { 4 });
     let mut attempt: u32 = 0;
     let mut delay_ms: u64 = 200;
-    loop {
-        match opts.connect(&final_url).await {
-            Ok(p) => { pool = Some(p); break; }
+    let pool: Pool<Postgres> = loop {
+        match opts.clone().connect(&final_url).await {
+            Ok(p) => break p,
             Err(e) => {
-                let is_transient = matches!(e,
-                    sqlx::Error::PoolTimedOut
-                ) || format!("{}", e).to_lowercase().contains("connection refused")
-                  || format!("{}", e).to_lowercase().contains("failed to lookup address")
-                  || format!("{}", e).to_lowercase().contains("server error")
-                  || format!("{}", e).to_lowercase().contains("no such host");
+                let msg = e.to_string().to_lowercase();
+                let is_transient = matches!(e, sqlx::Error::PoolTimedOut)
+                    || msg.contains("connection refused")
+                    || msg.contains("failed to lookup address")
+                    || msg.contains("server error")
+                    || msg.contains("no such host");
                 if attempt >= max_retries || !is_transient {
                     panic!("connect test db failed after {} attempts: {}", attempt + 1, e);
                 }
@@ -160,8 +159,7 @@ async fn build_test_pool(shared: bool) -> Pool<Postgres> {
                 delay_ms = (delay_ms as f64 * 1.7) as u64;
             }
         }
-    }
-    let pool = pool.expect("unreachable: pool must be set on Ok");
+    };
     if shared {
         static FIRST: std::sync::Once = std::sync::Once::new();
         FIRST.call_once(|| eprintln!("Using shared test pool (url={})", sanitize_url(&final_url)));
