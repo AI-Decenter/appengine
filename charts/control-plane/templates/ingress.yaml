@@ -11,6 +11,14 @@ spec:
   {{- if .Values.ingress.className }}
   ingressClassName: {{ .Values.ingress.className }}
   {{- end }}
+  {{- if and .Values.tls.enabled .Values.tls.secretName }}
+  tls:
+    - hosts:
+        {{- range .Values.ingress.hosts }}
+        - {{ .host }}
+        {{- end }}
+      secretName: {{ .Values.tls.secretName }}
+  {{- end }}
   rules:
   {{- range .Values.ingress.hosts }}
     - host: {{ .host }}
@@ -26,7 +34,7 @@ spec:
                   number: {{ $.Values.service.port }}
         {{- end }}
   {{- end }}
-  {{- if .Values.ingress.tls }}
+  {{- if and (not .Values.tls.enabled) .Values.ingress.tls }}
   tls:
 {{ toYaml .Values.ingress.tls | indent 4 }}
   {{- end }}

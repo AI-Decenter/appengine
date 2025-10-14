@@ -46,8 +46,10 @@ pub enum Commands {
         #[arg(long, default_value_t = false)] no_cache: bool,
         /// Bỏ qua sinh SBOM (tăng tốc) – JSON output vẫn trả path dự kiến nhưng file có thể không tồn tại
         #[arg(long, default_value_t = false)] no_sbom: bool,
-    /// Sinh SBOM theo chuẩn CycloneDX 1.5 JSON thay vì schema nội bộ (đang chuyển đổi)
-    #[arg(long, default_value_t = false)] cyclonedx: bool,
+        /// Dùng SBOM legacy nội bộ thay vì CycloneDX (mặc định CycloneDX)
+        #[arg(long, default_value_t = false, help = "Use legacy internal SBOM format instead of default CycloneDX")] legacy_sbom: bool,
+        /// Giữ cờ tương thích: buộc CycloneDX (mặc định đã là CycloneDX)
+        #[arg(long, default_value_t = false, hide = true)] cyclonedx: bool,
         /// Định dạng output: text|json (json in ra metadata artifact)
         #[arg(long, default_value = "text")] format: Option<String>,
         /// Dùng lộ trình upload legacy multipart (fallback). Mặc định tắt: CLI sẽ lỗi nếu two-phase thất bại.

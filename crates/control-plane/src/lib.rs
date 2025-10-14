@@ -175,6 +175,26 @@ pub fn build_router(state: AppState) -> Router {
     }
     let trace_layer_mw = axum::middleware::from_fn(trace_layer);
 
+    // CORS layer (optional): if AETHER_CORS_ALLOWED_ORIGINS is set, only allow those origins
+    let cors_layer = {
+        if let Ok(list) = std::env::var("AETHER_CORS_ALLOWED_ORIGINS") {
+            if !list.trim().is_empty() {
+                let mut origins: Vec<axum::http::HeaderValue> = Vec::new();
+                for o in list.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                    if let Ok(h) = axum::http::HeaderValue::from_str(o) { origins.push(h); }
+                }
+                if !origins.is_empty() {
+                    use tower_http::cors::{CorsLayer, AllowOrigin};
+                    let layer = CorsLayer::new()
+                        .allow_origin(AllowOrigin::list(origins))
+                        .allow_methods([axum::http::Method::GET, axum::http::Method::POST, axum::http::Method::PATCH])
+                        .allow_headers([axum::http::header::CONTENT_TYPE, axum::http::header::AUTHORIZATION]);
+                    Some(layer)
+                } else { None }
+            } else { None }
+        } else { None }
+    };
+
     // Optional auth and RBAC layers (activate only when AETHER_AUTH_REQUIRED=1)
     let auth_store = std::sync::Arc::new(crate::auth::AuthStore::from_env());
     let auth_store_for_auth = auth_store.clone();
@@ -253,6 +273,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/openapi.json", get(move || async move { axum::Json(openapi.clone()) }))
         .route("/swagger", get(swagger_ui))
         .layer(trace_layer_mw)
+        .apply_if(cors_layer.is_some(), |r| r.layer(cors_layer.unwrap()))
         .with_state(state)
 }
 
@@ -349,6 +370,8 @@ mod tests {
         assert_eq!(res.status(), StatusCode::OK);
         let _body = axum::body::to_bytes(res.into_body(), 10_000).await.unwrap();
     }
+
+    // Integration tests for mock-kube non-mock path are covered at handler-level in handlers::apps tests.
 
     #[tokio::test]
     async fn readiness_ok() {

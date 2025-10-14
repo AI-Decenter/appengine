@@ -46,7 +46,23 @@ ingress:
       paths:
         - path: /
           pathType: Prefix
-  tls: []
+  tls: [] # e.g., [{ hosts: [aether.local], secretName: aether-tls }]
+
+# TLS convenience flags (dev self-signed)
+tls:
+  enabled: false
+  secretName: ""
+  selfSigned:
+    enabled: false
+    commonName: aether.local
+    days: 365
 
 # Optional additional config entries for the ConfigMap
 config: {}
+
+# Auth and CORS policy
+tokens:
+  rotation: ""
+  scopes: ["admin", "reader"]
+cors:
+  allowedOrigins: ["http://localhost:3000"]

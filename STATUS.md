@@ -58,6 +58,7 @@ Ghi chú chạy test Control Plane:
 - CLI
   - Detect NodeJS, install/prune production, pack artifact, manifest, SBOM (legacy/CycloneDX), ký Ed25519 (optional), upload 2 pha + multipart, tạo deployment.
   - JSON output ổn định (deploy --format json), cache node_modules, benches và baseline.
+  - SBOM/Provenance: CycloneDX mặc định; `--legacy-sbom` để dùng định dạng nội bộ; hỗ trợ tạo provenance khi bật `AETHER_REQUIRE_PROVENANCE`, timeout hiển thị qua `AETHER_PROVENANCE_TIMEOUT_MS` (dry-run JSON có field `note`).
 - Control Plane
   - Artifact ingestion (legacy + presign/complete + multipart), idempotent, quota/retention; HEAD existence; meta.
   - Verification: size/metadata digest; remote full hash (small object, optional, có giới hạn bytes và retry/backoff).

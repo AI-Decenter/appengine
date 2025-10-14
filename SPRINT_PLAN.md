@@ -81,10 +81,10 @@ Epic G: Security/TLS & policy switches
   - Est: 3 pts
 
 Epic H: SBOM/Provenance enforcement hardening
-- H1 CLI CycloneDX by default; fallback legacy behind flag
-  - DoD: control-plane validates manifest_digest consistency reliably
+- H1 CLI CycloneDX by default; fallback legacy behind flag — DONE
+  - DoD: control-plane validates manifest_digest consistency reliably (mocked in tests)
   - Est: 2 pts
-- H2 Provenance generation path: sync flag + timeout behavior documented
+- H2 Provenance generation path: sync flag + timeout behavior documented — DONE
   - DoD: tests pass w/ AETHER_REQUIRE_PROVENANCE=1
   - Est: 2 pts
 

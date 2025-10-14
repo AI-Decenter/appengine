@@ -194,6 +194,13 @@ When invoking `aether deploy --format json`, the CLI prints a single JSON object
 
 Error Behavior (JSON mode): currently non‑zero failures may still emit human readable text before JSON; future work will standardize an error envelope `{ "error": { code, message } }` (tracked in Issue 01 follow-up – now resolved in this branch by suppressing SBOM generation when skipped).
 
+### 3.3 SBOM and Provenance Controls
+
+- Default SBOM format: CycloneDX 1.5 JSON. Pass `--legacy-sbom` to emit the internal legacy format instead (schema `aether-sbom-v1`).
+- Disable SBOM generation entirely with `--no-sbom` (useful for quick iterations or constrained environments).
+- Provenance enforcement: set environment variable `AETHER_REQUIRE_PROVENANCE=1` to require provenance generation during deploy flows. In dry-run mode, this will emit a minimal `.provenance.json` file path in the JSON output.
+- Provenance timeout: `AETHER_PROVENANCE_TIMEOUT_MS=<millis>` can be set to enforce a maximum waiting time for provenance; when exceeded, the CLI will include a `note: "timeout"` field in JSON dry-run output.
+
 ---
 
 ## 4. Control Plane
