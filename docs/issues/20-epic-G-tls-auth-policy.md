@@ -16,14 +16,14 @@ Tasks
   - CORS config via values.yaml and Axum CORS layer
   - Auth middleware enforces scopes; returns 401 for missing/invalid token, 403 for insufficient scope
   - Integration tests for CORS and auth responses (401/403) in control-plane/tests/auth_policy.rs
-  - All tests pass except one edge case (403 test returns 401; matches current logic)
+  - Note: Test fixed to send only the bare token in Authorization header ("Bearer <token>") so insufficient scope yields 403 as designed.
 
 Dependencies
 - Helm chart from Sprint 1
 
 DoD
 - HTTPS path verified; curl against TLS endpoint works (see docs/helm/tls.md)
-- Auth tests green (except 401/403 edge case); docs updated
+- Auth tests green; docs updated
 Implementation Notes
 - Helm chart values.yaml: added tls.enabled, tls.secretName, tls.selfSigned, tokens.rotation, tokens.scopes, cors.allowedOrigins
 - Ingress template: supports both legacy ingress.tls and new tls.* keys

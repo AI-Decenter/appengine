@@ -96,7 +96,9 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 pub fn is_auth_enabled(cfg: &AuthStore) -> bool {
-	cfg.auth_required && !cfg.by_hash.is_empty()
+	// If auth is required, enforce it even if no tokens are configured.
+	// Missing or unknown tokens will correctly yield 401, and insufficient scope will yield 403.
+	cfg.auth_required
 }
 
 pub async fn auth_middleware(mut req: Request, next: Next, store: Arc<AuthStore>) -> Result<axum::response::Response, axum::response::Response> {
