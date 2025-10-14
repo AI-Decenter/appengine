@@ -35,6 +35,7 @@ pub struct AppState { pub db: Pool<Postgres> }
     handlers::readiness::startupz,
         handlers::apps::create_app,
         handlers::apps::list_apps,
+    handlers::apps::app_logs,
         handlers::apps::app_deployments,
         handlers::deployments::create_deployment,
     handlers::deployments::list_deployments,
