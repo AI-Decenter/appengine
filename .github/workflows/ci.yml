@@ -36,7 +36,9 @@ jobs:
         db: [testcontainers, service]
     env:
       RUSTC_WRAPPER: sccache
-      RUSTFLAGS: -C debuginfo=1
+      RUSTFLAGS: -C debuginfo=0
+      CARGO_INCREMENTAL: 0
+      SCCACHE_CACHE_SIZE: 1G
     services:
       postgres:
         image: postgres:15-alpine
@@ -50,6 +52,22 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Free disk space (remove large preinstalled tools)
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          swap-storage: true
+          docker-images: true
+
+      - name: Prune unused Docker data
+        run: |
+          docker system prune -af || true
+          docker volume prune -f || true
 
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -135,7 +153,9 @@ jobs:
         db: [testcontainers, service]
     env:
       RUSTC_WRAPPER: sccache
-      RUSTFLAGS: -C debuginfo=1
+      RUSTFLAGS: -C debuginfo=0
+      CARGO_INCREMENTAL: 0
+      SCCACHE_CACHE_SIZE: 1G
     services:
       postgres:
         image: postgres:15-alpine
@@ -149,6 +169,22 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Free disk space (remove large preinstalled tools)
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          swap-storage: true
+          docker-images: true
+
+      - name: Prune unused Docker data
+        run: |
+          docker system prune -af || true
+          docker volume prune -f || true
 
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
