@@ -202,9 +202,19 @@ pub fn build_router(state: AppState) -> Router {
     // Optional WebSocket logs route
     #[cfg(feature = "logs-ws")]
     {
-        use axum::routing::get as get_ws;
-        reads = reads.route("/apps/:app_name/logs/ws", get_ws(handlers::apps::app_logs_ws));
+        use axum::{routing::get as get_ws, extract::{Path, WebSocketUpgrade}, response::IntoResponse};
+        async fn ws_logs(Path(_app): Path<String>, ws: WebSocketUpgrade) -> impl IntoResponse {
+            use axum::extract::ws::{Message, CloseFrame};
+            use std::borrow::Cow;
+            ws.on_upgrade(|mut socket: axum::extract::ws::WebSocket| async move {
+                // Try to send a close frame with a reason, then close
+                let _ = socket.send(Message::Close(Some(CloseFrame { code: axum::extract::ws::close_code::POLICY, reason: Cow::from("use HTTP stream") }))).await;
+                let _ = socket.close().await;
+            })
+        }
+        reads = reads.route("/apps/:app_name/logs/ws", get_ws(ws_logs));
     }
+    reads = reads
         .route("/artifacts", get(list_artifacts))
         .route("/artifacts/:digest", axum::routing::head(head_artifact))
         .route("/artifacts/:digest/meta", get(handlers::uploads::artifact_meta))
@@ -218,8 +228,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/provenance/keys", get(handlers::keys::list_keys))
         .route("/apps", get(list_apps))
         .route("/apps/:app_name/deployments", get(app_deployments))
-        .route("/apps/:app_name/logs", get(app_logs))
-        .layer(auth_layer.clone());
+        .route("/apps/:app_name/logs", get(app_logs));
+    let reads = reads.layer(auth_layer.clone());
 
     // Write endpoints (auth + admin)
     let writes = Router::new()
