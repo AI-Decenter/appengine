@@ -36,7 +36,7 @@ jobs:
         db: [testcontainers, service]
     env:
       RUSTC_WRAPPER: sccache
-      RUSTFLAGS: -C debuginfo=0 -C prefer-dynamic
+      RUSTFLAGS: -C debuginfo=0 -C prefer-dynamic -C strip=symbols -C link-arg=-Wl,--no-threads -C link-arg=-Wl,--no-keep-memory
       CARGO_INCREMENTAL: 0
       SCCACHE_CACHE_SIZE: 1G
       CARGO_BUILD_JOBS: 2
@@ -154,7 +154,7 @@ jobs:
         db: [testcontainers, service]
     env:
       RUSTC_WRAPPER: sccache
-      RUSTFLAGS: -C debuginfo=0 -C prefer-dynamic
+      RUSTFLAGS: -C debuginfo=0 -C prefer-dynamic -C strip=symbols -C link-arg=-Wl,--no-threads -C link-arg=-Wl,--no-keep-memory
       CARGO_INCREMENTAL: 0
       SCCACHE_CACHE_SIZE: 1G
       CARGO_BUILD_JOBS: 2
@@ -269,7 +269,10 @@ jobs:
           AETHER_ARTIFACT_BUCKET: artifacts
           AETHER_S3_ENDPOINT_URL: http://localhost:9000
         run: |
-          cargo test -j 2 -p control-plane --features s3 -- --nocapture --test-threads=2
+          # Build test binaries serially to avoid concurrent linkers exhausting memory
+          cargo test -p control-plane --features s3 --no-run -j 1
+          # Run tests; this should not trigger re-linking
+          cargo test -p control-plane --features s3 -- --nocapture --test-threads=2
 
       - name: Clippy (strict)
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
