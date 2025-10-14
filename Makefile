@@ -9,7 +9,7 @@ PG_CONTAINER_NAME ?= aether-pg-test
 PG_IMAGE ?= postgres:15
 SQLX ?= sqlx
 
-.PHONY: all build fmt lint test clean sqlx-prepare crd db-start test-no-db test-db helm-lint helm-template
+.PHONY: all build fmt lint test clean sqlx-prepare crd db-start test-no-db test-db helm-lint helm-template test-ci
 .PHONY: base-image-build base-image-scan base-image-sbom base-image-push
 
 all: build
@@ -64,6 +64,23 @@ helm-template:
 	  helm template test charts/control-plane --set env.DATABASE_URL=postgres://user:pass@host:5432/db --set env.TOKENS=t_admin:admin:alice; \
 	else \
 	  echo "helm not installed; skipping template"; \
+	fi
+
+# CI-friendly test runner that selects DB strategy:
+# - If Docker is available: use testcontainers (unset DATABASE_URL, force harness path)
+# - Else: start a managed Postgres service and use DATABASE_URL
+test-ci:
+	@echo "[test-ci] Selecting DB strategy..."; \
+	if command -v docker >/dev/null 2>&1; then \
+	  echo "[test-ci] Docker detected -> using testcontainers"; \
+	  unset DATABASE_URL; \
+	  AETHER_FORCE_TESTCONTAINERS=1 AETHER_TEST_SHARED_POOL=0 AETHER_FAST_TEST=1 \
+	  cargo test -p control-plane -- --nocapture; \
+	else \
+	  echo "[test-ci] Docker not available -> using managed Postgres service"; \
+	  $(MAKE) ensure-postgres; \
+	  DATABASE_URL=$(DATABASE_URL) AETHER_TEST_SHARED_POOL=0 AETHER_FAST_TEST=1 \
+	  cargo test -p control-plane -- --nocapture; \
 	fi
 
 sqlx-prepare:

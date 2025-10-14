@@ -137,7 +137,31 @@ async fn build_test_pool(shared: bool) -> Pool<Postgres> {
                 let _ = sqlx::query("SET idle_in_transaction_session_timeout = 10000").execute(&mut *conn).await; // 10s
             Ok(())
         }));
-    let pool = opts.connect(&final_url).await.expect("connect test db");
+    // Connection with retry guards to mitigate transient startup races in CI
+    let mut pool: Option<Pool<Postgres>> = None;
+    let max_retries: u32 = std::env::var("AETHER_TEST_DB_CONNECT_RETRIES").ok().and_then(|v| v.parse().ok()).unwrap_or_else(|| if std::env::var("CI").is_ok() { 8 } else { 4 });
+    let mut attempt: u32 = 0;
+    let mut delay_ms: u64 = 200;
+    loop {
+        match opts.connect(&final_url).await {
+            Ok(p) => { pool = Some(p); break; }
+            Err(e) => {
+                let is_transient = matches!(e,
+                    sqlx::Error::PoolTimedOut
+                ) || format!("{}", e).to_lowercase().contains("connection refused")
+                  || format!("{}", e).to_lowercase().contains("failed to lookup address")
+                  || format!("{}", e).to_lowercase().contains("server error")
+                  || format!("{}", e).to_lowercase().contains("no such host");
+                if attempt >= max_retries || !is_transient {
+                    panic!("connect test db failed after {} attempts: {}", attempt + 1, e);
+                }
+                attempt += 1;
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms.min(1500))).await;
+                delay_ms = (delay_ms as f64 * 1.7) as u64;
+            }
+        }
+    }
+    let pool = pool.expect("unreachable: pool must be set on Ok");
     if shared {
         static FIRST: std::sync::Once = std::sync::Once::new();
         FIRST.call_once(|| eprintln!("Using shared test pool (url={})", sanitize_url(&final_url)));

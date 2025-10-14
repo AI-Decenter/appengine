@@ -14,10 +14,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # Reuse a single logical DB across tests (our harness truncates tables per test state)
-  DATABASE_URL: postgres://aether:postgres@localhost:5432/aether_test
-  POSTGRES_PASSWORD: postgres
-  AETHER_TEST_SHARED_POOL: '1'
+  # Default test pool tuning; jobs can override per mode
   AETHER_TEST_MAX_CONNS: '12'
   # Provide deterministic AWS context & disable metadata to avoid network stalls
   AWS_EC2_METADATA_DISABLED: 'true'
@@ -33,6 +30,10 @@ jobs:
     if: ${{ github.event_name != 'schedule' }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        db: [testcontainers, service]
     env:
       RUSTC_WRAPPER: sccache
       RUSTFLAGS: -C debuginfo=1
@@ -66,12 +67,26 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' || github.event_name == 'schedule' }}
 
+      - name: Configure DB mode (testcontainers)
+        if: ${{ matrix.db == 'testcontainers' }}
+        run: |
+          echo "Using testcontainers DB mode";
+          unset DATABASE_URL
+          echo "AETHER_FORCE_TESTCONTAINERS=1" >> $GITHUB_ENV
+          echo "AETHER_TEST_SHARED_POOL=0" >> $GITHUB_ENV
+          echo "AETHER_FAST_TEST=1" >> $GITHUB_ENV
+      - name: Configure DB mode (service)
+        if: ${{ matrix.db == 'service' }}
+        run: |
+          echo "Using managed Postgres service DB mode";
+          echo "DATABASE_URL=postgres://aether:postgres@localhost:5432/aether_test" >> $GITHUB_ENV
+          echo "POSTGRES_PASSWORD=postgres" >> $GITHUB_ENV
+          echo "AETHER_TEST_SHARED_POOL=0" >> $GITHUB_ENV
+          echo "AETHER_FAST_TEST=1" >> $GITHUB_ENV
+
       - name: Fast test suite (no S3 features)
         env:
-          AETHER_FAST_TEST: '1'
           EXPECT_FAST: '1'
-          # Use per-test DB pools to avoid runtime shutdown issues
-          AETHER_TEST_SHARED_POOL: '0'
           # Provide dummy tokens to auth-aware tests (middleware defaults to optional auth)
           AETHER_API_TOKENS: t_admin:admin:alice,t_reader:reader:bob
         run: |
@@ -114,6 +129,10 @@ jobs:
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        db: [testcontainers, service]
     env:
       RUSTC_WRAPPER: sccache
       RUSTFLAGS: -C debuginfo=1
@@ -145,13 +164,26 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
+      - name: Configure DB mode (testcontainers)
+        if: ${{ matrix.db == 'testcontainers' }}
+        run: |
+          echo "Using testcontainers DB mode";
+          unset DATABASE_URL
+          echo "AETHER_FORCE_TESTCONTAINERS=1" >> $GITHUB_ENV
+          echo "AETHER_TEST_SHARED_POOL=0" >> $GITHUB_ENV
+      - name: Configure DB mode (service)
+        if: ${{ matrix.db == 'service' }}
+        run: |
+          echo "Using managed Postgres service DB mode";
+          echo "DATABASE_URL=postgres://aether:postgres@localhost:5432/aether_test" >> $GITHUB_ENV
+          echo "POSTGRES_PASSWORD=postgres" >> $GITHUB_ENV
+          echo "AETHER_TEST_SHARED_POOL=0" >> $GITHUB_ENV
+
       - name: Full workspace tests (PR-safe)
         if: ${{ github.event_name == 'pull_request' }}
         env:
           # Tokens available for tests that opt-in to auth; enforcement remains opt-out by default
           AETHER_API_TOKENS: t_admin:admin:alice,t_reader:reader:bob
-          # Use per-test DB pools to avoid runtime shutdown issues
-          AETHER_TEST_SHARED_POOL: '0'
         run: |
           cargo test --workspace -- --nocapture --test-threads=4
 
@@ -160,8 +192,6 @@ jobs:
         env:
           # Tokens available for tests that opt-in to auth; enforcement remains opt-out by default
           AETHER_API_TOKENS: t_admin:admin:alice,t_reader:reader:bob
-          # Use per-test DB pools to avoid runtime shutdown issues
-          AETHER_TEST_SHARED_POOL: '0'
         run: |
           cargo test --workspace --all-features -- --nocapture --test-threads=4
 
@@ -223,7 +253,7 @@ jobs:
         run: |
           echo "## Test Summary" >> $GITHUB_STEP_SUMMARY
           echo "Fast mode: PR job; Full mode: main/nightly/manual." >> $GITHUB_STEP_SUMMARY
-          echo "DB URL: $DATABASE_URL" >> $GITHUB_STEP_SUMMARY
+          echo "DB mode: ${{ matrix.db }}" >> $GITHUB_STEP_SUMMARY
 
   benchmarks:
     name: Benchmarks (enforced)
