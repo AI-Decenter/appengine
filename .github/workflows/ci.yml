@@ -36,9 +36,10 @@ jobs:
         db: [testcontainers, service]
     env:
       RUSTC_WRAPPER: sccache
-      RUSTFLAGS: -C debuginfo=0
+      RUSTFLAGS: -C debuginfo=0 -C prefer-dynamic
       CARGO_INCREMENTAL: 0
       SCCACHE_CACHE_SIZE: 1G
+      CARGO_BUILD_JOBS: 2
     services:
       postgres:
         image: postgres:15-alpine
@@ -108,8 +109,8 @@ jobs:
           # Provide dummy tokens to auth-aware tests (middleware defaults to optional auth)
           AETHER_API_TOKENS: t_admin:admin:alice,t_reader:reader:bob
         run: |
-          cargo test -p control-plane --lib -- --nocapture
-          cargo test -p control-plane --test sbom_manifest_enforcement -- --nocapture
+          cargo test -j 2 -p control-plane --lib -- --nocapture
+          cargo test -j 2 -p control-plane --test sbom_manifest_enforcement -- --nocapture
           # (Optionally) add other crate smoke tests here
       - name: Network stack regression check
         run: |
@@ -153,9 +154,10 @@ jobs:
         db: [testcontainers, service]
     env:
       RUSTC_WRAPPER: sccache
-      RUSTFLAGS: -C debuginfo=0
+      RUSTFLAGS: -C debuginfo=0 -C prefer-dynamic
       CARGO_INCREMENTAL: 0
       SCCACHE_CACHE_SIZE: 1G
+      CARGO_BUILD_JOBS: 2
     services:
       postgres:
         image: postgres:15-alpine
@@ -221,7 +223,7 @@ jobs:
           # Tokens available for tests that opt-in to auth; enforcement remains opt-out by default
           AETHER_API_TOKENS: t_admin:admin:alice,t_reader:reader:bob
         run: |
-          cargo test --workspace -- --nocapture --test-threads=4
+          cargo test -j 2 --workspace -- --nocapture --test-threads=4
 
       - name: Full workspace tests (all features)
         if: ${{ github.event_name != 'pull_request' }}
@@ -229,12 +231,12 @@ jobs:
           # Tokens available for tests that opt-in to auth; enforcement remains opt-out by default
           AETHER_API_TOKENS: t_admin:admin:alice,t_reader:reader:bob
         run: |
-          cargo test --workspace --all-features -- --nocapture --test-threads=4
+          cargo test -j 2 --workspace --all-features -- --nocapture --test-threads=4
 
       - name: S3 compile check (non-PR)
         if: ${{ github.event_name != 'pull_request' }}
         run: |
-          cargo check -p control-plane --features s3
+          cargo check -j 2 -p control-plane --features s3
 
       - name: Start MinIO (non-PR)
         if: ${{ github.event_name != 'pull_request' && env.AETHER_ENABLE_S3_FULL_CI == '1' }}
@@ -267,7 +269,7 @@ jobs:
           AETHER_ARTIFACT_BUCKET: artifacts
           AETHER_S3_ENDPOINT_URL: http://localhost:9000
         run: |
-          cargo test -p control-plane --features s3 -- --nocapture --test-threads=2
+          cargo test -j 2 -p control-plane --features s3 -- --nocapture --test-threads=2
 
       - name: Clippy (strict)
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
