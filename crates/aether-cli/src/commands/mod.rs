@@ -9,6 +9,7 @@ pub mod netfail;
 pub mod iofail;
 pub mod usagefail;
 pub mod runtimefail;
+pub mod dev;
 
 #[derive(clap::ValueEnum, Clone, Debug)]
 pub enum LogFormat { Auto, Text, Json }
@@ -45,6 +46,10 @@ pub enum Commands {
         #[arg(long, default_value_t = false)] no_cache: bool,
         /// Bỏ qua sinh SBOM (tăng tốc) – JSON output vẫn trả path dự kiến nhưng file có thể không tồn tại
         #[arg(long, default_value_t = false)] no_sbom: bool,
+        /// Dùng SBOM legacy nội bộ thay vì CycloneDX (mặc định CycloneDX)
+        #[arg(long, default_value_t = false, help = "Use legacy internal SBOM format instead of default CycloneDX")] legacy_sbom: bool,
+        /// Giữ cờ tương thích: buộc CycloneDX (mặc định đã là CycloneDX)
+        #[arg(long, default_value_t = false, hide = true)] cyclonedx: bool,
         /// Định dạng output: text|json (json in ra metadata artifact)
         #[arg(long, default_value = "text")] format: Option<String>,
         /// Dùng lộ trình upload legacy multipart (fallback). Mặc định tắt: CLI sẽ lỗi nếu two-phase thất bại.
@@ -52,8 +57,21 @@ pub enum Commands {
     /// Bật chế độ dev hot reload (sidecar fetch loop)
     #[arg(long, default_value_t = false)] dev_hot: bool,
     },
-    /// Mock hiển thị log gần nhất
-    Logs { #[arg(long)] app: Option<String> },
+    /// Hiển thị log (theo dõi theo thời gian thực nếu --follow)
+    Logs {
+        /// Tên ứng dụng (mặc định lấy từ AETHER_DEFAULT_APP hoặc sample-app)
+        #[arg(long)] app: Option<String>,
+        /// Theo dõi (giữ kết nối, tự reconnect khi bị ngắt)
+        #[arg(long, default_value_t = false)] follow: bool,
+        /// Bộ lọc thời gian (RFC3339 hoặc duration như 30s,5m)
+        #[arg(long)] since: Option<String>,
+        /// Chọn container cụ thể
+        #[arg(long)] container: Option<String>,
+        /// Định dạng hiển thị: json|text (mặc định text)
+        #[arg(long)] format: Option<String>,
+        /// Tô màu theo pod/container (chỉ áp dụng cho text/json in ra terminal)
+        #[arg(long, default_value_t = false)] color: bool,
+    },
     /// Mock liệt kê ứng dụng
     List {},
     /// Sinh shell completions (ẩn)
@@ -71,4 +89,6 @@ pub enum Commands {
     /// Simulate runtime error (hidden, for testing exit codes)
     #[command(hide = true)]
     Runtimefail {},
+    /// Dev loop: watch local source & auto deploy hot (experimental)
+    Dev { #[arg(long, default_value_t=false)] hot: bool, #[arg(long, default_value="500ms")] interval: String },
 }

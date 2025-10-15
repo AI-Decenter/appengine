@@ -17,7 +17,7 @@ pub async fn run_deployment_status_watcher(db: Pool<sqlx::Postgres>) {
     futures_util::pin_mut!(stream);
     while let Some(ev) = stream.next().await {
         match ev {
-            Ok(Event::Applied(d_obj)) => {
+            Ok(Event::Apply(d_obj)) | Ok(Event::InitApply(d_obj)) => {
                 let app_name = d_obj.name_any();
                 let status = d_obj.status.clone();
                 let available = status.as_ref().and_then(|s| s.available_replicas).unwrap_or(0);
@@ -54,9 +54,9 @@ pub async fn run_deployment_status_watcher(db: Pool<sqlx::Postgres>) {
                         if let Some(rsn) = failed_reason { crate::services::deployments::mark_failed(&db, dep_id, &rsn).await; tracing::warn!(deployment_id=%dep_id, app=%app_name, reason=%rsn, "deployment failed (watch)"); }
                 }
             }
-            Ok(Event::Restarted(objs)) => {
-                for d_obj in objs { let app_name = d_obj.name_any(); /* ignore restarted backlog for simplicity */ let _ = app_name; }
-            }
+            Ok(Event::Init) => { /* stream restarted - ignore marker */ }
+            Ok(Event::InitDone) => { /* finished initial listing - no action */ }
+            Ok(Event::Delete(_)) => { /* not used for status transitions */ }
             _ => {}
         }
     }

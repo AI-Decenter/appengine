@@ -17,10 +17,11 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 thiserror = { workspace = true }
 once_cell = { workspace = true }
-k8s-openapi = { version = "0.21", features = ["v1_28"] }
-kube = { version = "0.88", features = ["runtime","derive","client"], default-features = false }
-kube-runtime = "0.88"
+k8s-openapi = { version = "0.22", features = ["v1_28"] }
+kube = { workspace = true, features = ["runtime","derive","client"], default-features = false }
+kube-runtime = { workspace = true }
 futures-util = "0.3"
+tokio-stream = "0.1"
 tower = { version = "0.4", features = ["util","timeout"] }
 utoipa = { version = "5", features = ["chrono", "uuid", "axum_extras"] }
 prometheus = "0.14"
@@ -29,8 +30,12 @@ tower-http = { version = "0.5", features = ["limit", "trace", "cors"] }
 sha2 = "0.10"
 ed25519-dalek = { version = "2", features = ["std","rand_core"] }
 hex = "0.4"
-aws-config = { version = "1", optional = true }
-aws-sdk-s3 = { version = "1", optional = true, default-features = true }
+jsonschema = { version = "0.17", default-features = false }
+base64 = "0.21"
+glob = "0.3"
+flate2 = { version = "1", default-features = true, features=["zlib"] }
+aws-config = { version = "1", optional = true, default-features = false, features = ["rustls", "rt-tokio"] }
+aws-sdk-s3 = { version = "1", optional = true, default-features = false, features = ["rustls", "rt-tokio"] }
 async-trait = "0.1"
 url = "2"
 regex = "1"
@@ -39,12 +44,13 @@ rustc-hash = "1.1"
 testcontainers = { version = "0.20", default-features = false, features = ["watchdog"] }
 
 [features]
-default = ["s3"]
+default = []
 s3 = ["aws-config", "aws-sdk-s3"]
 # Enable lightweight in-memory SQLite for tests (skips S3 specific behavior where not needed).
 sqlite-test = []
 mock-kube = []
 dev-hot-ingest = []
+logs-ws = ["axum/ws"]
 
 [dev-dependencies]
 proptest = "1"
@@ -52,4 +58,5 @@ serial_test = "3"
 rand = "0.8"
 futures = "0.3"
 reqwest = { workspace = true }
+tempfile = "3"
 

@@ -43,7 +43,13 @@ fn deploy_dry_run() {
 #[test]
 fn logs_mock() {
     let tmp = tempfile::tempdir().unwrap();
-    bin().env("XDG_CONFIG_HOME", tmp.path()).env("XDG_CACHE_HOME", tmp.path()).args(["logs"]).assert().success();
+    bin()
+        .env("XDG_CONFIG_HOME", tmp.path())
+        .env("XDG_CACHE_HOME", tmp.path())
+        .env("AETHER_API_BASE", "http://127.0.0.1:0")
+        .env("AETHER_LOGS_FOLLOW", "0")
+        .env("AETHER_LOGS_FORMAT", "text")
+        .args(["logs"]).assert().success();
 }
 
 #[test]

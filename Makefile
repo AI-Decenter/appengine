@@ -9,7 +9,8 @@ PG_CONTAINER_NAME ?= aether-pg-test
 PG_IMAGE ?= postgres:15
 SQLX ?= sqlx
 
-.PHONY: all build fmt lint test clean sqlx-prepare crd db-start test-no-db test-db
+.PHONY: all build fmt lint test clean sqlx-prepare crd db-start test-no-db test-db helm-lint helm-template test-ci
+.PHONY: base-image-build base-image-scan base-image-sbom base-image-push
 
 all: build
 
@@ -48,6 +49,39 @@ test-db: ensure-postgres ## Initialize dedicated test database and run migration
 
 clean:
 	cargo clean
+
+helm-lint:
+	@echo "[helm-lint] Linting charts/control-plane (if helm installed)"; \
+	if command -v helm >/dev/null 2>&1; then \
+	  helm lint charts/control-plane; \
+	else \
+	  echo "helm not installed; skipping lint"; \
+	fi
+
+helm-template:
+	@echo "[helm-template] Rendering chart to stdout (if helm installed)"; \
+	if command -v helm >/dev/null 2>&1; then \
+	  helm template test charts/control-plane --set env.DATABASE_URL=postgres://user:pass@host:5432/db --set env.TOKENS=t_admin:admin:alice; \
+	else \
+	  echo "helm not installed; skipping template"; \
+	fi
+
+# CI-friendly test runner that selects DB strategy:
+# - If Docker is available: use testcontainers (unset DATABASE_URL, force harness path)
+# - Else: start a managed Postgres service and use DATABASE_URL
+test-ci:
+	@echo "[test-ci] Selecting DB strategy..."; \
+	if command -v docker >/dev/null 2>&1; then \
+	  echo "[test-ci] Docker detected -> using testcontainers"; \
+	  unset DATABASE_URL; \
+	  AETHER_FORCE_TESTCONTAINERS=1 AETHER_TEST_SHARED_POOL=0 AETHER_FAST_TEST=1 \
+	  cargo test -p control-plane -- --nocapture; \
+	else \
+	  echo "[test-ci] Docker not available -> using managed Postgres service"; \
+	  $(MAKE) ensure-postgres; \
+	  DATABASE_URL=$(DATABASE_URL) AETHER_TEST_SHARED_POOL=0 AETHER_FAST_TEST=1 \
+	  cargo test -p control-plane -- --nocapture; \
+	fi
 
 sqlx-prepare:
 	DATABASE_URL=$(DATABASE_URL) cargo sqlx prepare --workspace -- --all-targets
@@ -114,3 +148,42 @@ schema-drift: ensure-postgres
 
 crd:
 	cargo run -p aether-operator --bin crd-gen > k8s/aetherapp-crd.yaml
+
+# ------------------------
+# Base image: aether-nodejs:20-slim
+# ------------------------
+REGISTRY ?= ghcr.io
+IMAGE_NAME ?= aether-nodejs
+IMAGE_TAG ?= 20-slim
+# OWNER should be lowercased (GHCR requires lowercase org/user)
+OWNER ?= $(shell echo "$${GITHUB_REPOSITORY_OWNER:-askernqk}" | tr 'A-Z' 'a-z')
+IMG_DIR := images/aether-nodejs/20-slim
+IMAGE := $(REGISTRY)/$(OWNER)/$(IMAGE_NAME):$(IMAGE_TAG)
+
+base-image-build: ## Build the base image locally
+	@echo "[base-image-build] Building $(IMAGE) from $(IMG_DIR)"; \
+	docker build -t $(IMAGE) -f $(IMG_DIR)/Dockerfile $(IMG_DIR)
+
+base-image-scan: ## Run local scans (Trivy/Grype) against the built image
+	@echo "[base-image-scan] Scanning $(IMAGE)"; \
+	if command -v trivy >/dev/null 2>&1; then \
+	  trivy image --severity CRITICAL,HIGH --ignore-unfixed --exit-code 0 $(IMAGE); \
+	else echo "[base-image-scan] trivy not found, skipping"; fi; \
+	if command -v grype >/dev/null 2>&1; then \
+	  grype $(IMAGE) || true; \
+	else echo "[base-image-scan] grype not found, skipping"; fi
+
+base-image-sbom: ## Generate SBOM (CycloneDX) if syft or docker sbom are available
+	@echo "[base-image-sbom] Generating SBOM for $(IMAGE)"; \
+	if command -v syft >/dev/null 2>&1; then \
+	  syft $(IMAGE) -o cyclonedx-json > sbom-$(IMAGE_NAME)-$(IMAGE_TAG).cdx.json; \
+	elif command -v docker >/dev/null 2>&1 && docker sbom --help >/dev/null 2>&1; then \
+	  docker sbom --format cyclonedx-json $(IMAGE) > sbom-$(IMAGE_NAME)-$(IMAGE_TAG).cdx.json; \
+	else \
+	  echo "[base-image-sbom] syft or docker sbom not found; skipping"; \
+	fi; \
+	[ -f sbom-$(IMAGE_NAME)-$(IMAGE_TAG).cdx.json ] && echo "[base-image-sbom] SBOM: sbom-$(IMAGE_NAME)-$(IMAGE_TAG).cdx.json" || true
+
+base-image-push: ## Push the base image to registry (requires login)
+	@echo "[base-image-push] Pushing $(IMAGE)"; \
+	docker push $(IMAGE)

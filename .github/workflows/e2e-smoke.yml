@@ -1,0 +1,26 @@
+name: E2E Smoke
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+      - name: Run E2E smoke (dry-run)
+        run: |
+          chmod +x scripts/smoke_e2e.sh
+          SMOKE_DRY_RUN=1 SMOKE_MARKDOWN_OUT=smoke-summary.md ./scripts/smoke_e2e.sh sample-node > smoke-report.json
+          echo "Smoke JSON:"; cat smoke-report.json
+      - name: Upload smoke artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-e2e
+          path: |
+            smoke-report.json
+            smoke-summary.md

@@ -11,3 +11,4 @@ Cargo.lock
 # Allow sqlx-data.json to be versioned for offline compile safety
 !sqlx-data.json
 coverage/
+examples/**/app-*.tar.gz*

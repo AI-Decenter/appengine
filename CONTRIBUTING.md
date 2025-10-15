@@ -27,6 +27,17 @@ The control plane expects Postgres at the URL printed by `dev.sh bootstrap`. Ove
 export DATABASE_URL=postgres://aether:postgres@localhost:5432/aether_dev
 ```
 
+CI and Test DB Strategy
+
+- CI runs control-plane tests under a DB strategy matrix:
+   - testcontainers (Docker available): unset `DATABASE_URL`, set `AETHER_FORCE_TESTCONTAINERS=1`, the harness will start an ephemeral Postgres.
+   - service (no Docker): start a managed Postgres service and set `DATABASE_URL`.
+- Local helpers:
+   - `make test-ci` picks a strategy based on Docker availability and runs `cargo test -p control-plane` accordingly.
+   - To explicitly force testcontainers locally: `AETHER_FORCE_TESTCONTAINERS=1 AETHER_TEST_SHARED_POOL=0 cargo test -p control-plane`.
+   - To use a local Postgres: `make ensure-postgres` and set `DATABASE_URL` as above.
+
+
 ## Branching & Commits
 
 - Default branch: `main`

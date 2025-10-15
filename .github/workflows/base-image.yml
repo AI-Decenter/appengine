@@ -1,0 +1,197 @@
+name: Base image
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'images/aether-nodejs/**'
+      - '.github/workflows/base-image.yml'
+      - 'Makefile'
+  workflow_dispatch: {}
+  schedule:
+    - cron: '0 0 1 * *' # monthly rebuilds
+
+permissions:
+  contents: read
+  packages: write
+  security-events: write
+  id-token: write # for cosign keyless signing
+
+env:
+  IMAGE_NAME: aether-nodejs
+  IMAGE_TAG: 20-slim
+  REGISTRY: ghcr.io
+  GATE_SEVERITY: HIGH
+
+jobs:
+  build-publish-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Compute date tag and owner (lowercase)
+        id: prep
+        run: |
+          echo "date=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+          echo "owner_lc=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Compute tags and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ghcr.io/${{ steps.prep.outputs.owner_lc }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ env.IMAGE_TAG }}
+            type=raw,value=${{ env.IMAGE_TAG }}-${{ steps.prep.outputs.date }}
+            type=sha
+          labels: |
+            org.opencontainers.image.title=aether-nodejs:${{ env.IMAGE_TAG }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+
+      - name: Build local image (amd64) for scanning
+        id: build_local
+        uses: docker/build-push-action@v6
+        with:
+          context: images/aether-nodejs/20-slim
+          file: images/aether-nodejs/20-slim/Dockerfile
+          push: false
+          load: true
+          platforms: linux/amd64
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}-ci
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Generate SBOM (CycloneDX)
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}-ci
+          artifact-name: sbom-${{ env.IMAGE_NAME }}-${{ env.IMAGE_TAG }}.cdx.json
+          format: cyclonedx-json
+
+      - name: Trivy scan (SARIF, non-blocking)
+        uses: aquasecurity/trivy-action@0.27.0
+        with:
+          image-ref: ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}-ci
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH,MEDIUM,LOW,UNKNOWN
+          exit-code: '0'
+          ignore-unfixed: true
+          trivyignores: .trivyignore
+
+      - name: Trivy scan (JSON summary for gating)
+        id: trivy_json
+        run: |
+          if [ "${{ env.GATE_SEVERITY }}" = "HIGH" ]; then SEV='CRITICAL,HIGH'; else SEV='CRITICAL'; fi
+          trivy image --format json --output trivy-results.json --severity "$SEV" --ignore-unfixed --ignorefile .trivyignore ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}-ci || true
+          CRIT=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL")] | length' trivy-results.json)
+          HIGH=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="HIGH")] | length' trivy-results.json)
+          echo "critical_count=$CRIT" >> $GITHUB_OUTPUT
+          echo "high_count=$HIGH" >> $GITHUB_OUTPUT
+          echo "CRITICAL: $CRIT, HIGH: $HIGH"
+          jq '{critical: [ .Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL") ] | length, high: [ .Results[]?.Vulnerabilities[]? | select(.Severity=="HIGH") ] | length }' trivy-results.json > trivy-summary.json
+
+      - name: Upload Trivy results to code scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif
+
+      - name: Summarize HIGH/CRITICAL findings
+        run: |
+          jq -r '[.Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL" or .Severity=="HIGH")] \
+            | sort_by(.Severity) \
+            | .[] \
+            | "\(.Severity)\t\(.VulnerabilityID)\t\(.PkgName)\tinstalled=\(.InstalledVersion)\tfixed=\(.FixedVersion // \"n/a\")"' trivy-results.json \
+            > trivy-findings.txt || true
+
+      - name: Print summarized findings
+        if: always()
+        run: |
+          echo "=== Trivy Findings (HIGH/CRITICAL) ==="; \
+          (test -s trivy-findings.txt && cat trivy-findings.txt) || echo "No HIGH/CRITICAL findings or summary not generated."
+
+      - name: Install grype
+        uses: anchore/scan-action/download-grype@v3
+
+      - name: Grype scan (image)
+        id: grype
+        uses: anchore/scan-action@v3
+        with:
+          image: ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}-ci
+          severity-cutoff: high
+          fail-build: false
+        continue-on-error: true
+        env:
+          GRYPE_CONFIG: ${{ github.workspace }}/security/grype-ignore.yaml
+
+      - name: Upload Grype SARIF
+        if: always() && steps.grype.outputs.sarif != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: ${{ steps.grype.outputs.sarif }}
+
+      - name: Attach artifacts (SBOM and scans)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: base-image-artifacts
+          path: |
+            sbom-*.json
+            trivy-results.sarif
+            trivy-results.json
+            trivy-summary.json
+            trivy-findings.txt
+            ${{ steps.grype.outputs.sarif }}
+
+      - name: Enforce gate (0 CRITICAL or 0 CRITICAL+HIGH)
+        run: |
+          if [ "${{ env.GATE_SEVERITY }}" = "HIGH" ]; then \
+            if [ "${{ steps.trivy_json.outputs.critical_count }}" != "0" ] || [ "${{ steps.trivy_json.outputs.high_count }}" != "0" ]; then \
+              echo "Fail: found CRITICAL=${{ steps.trivy_json.outputs.critical_count }}, HIGH=${{ steps.trivy_json.outputs.high_count }}"; exit 1; \
+            fi; \
+          else \
+            if [ "${{ steps.trivy_json.outputs.critical_count }}" != "0" ]; then \
+              echo "Fail: found CRITICAL=${{ steps.trivy_json.outputs.critical_count }}"; exit 1; \
+            fi; \
+          fi
+
+      - name: Log in to GHCR
+        if: success()
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push multi-arch image
+        if: success()
+        id: build_push
+        uses: docker/build-push-action@v6
+        with:
+          context: images/aether-nodejs/20-slim
+          file: images/aether-nodejs/20-slim/Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Install cosign (optional)
+        if: ${{ github.event_name != 'pull_request' }}
+        uses: sigstore/cosign-installer@v3
+
+        
+      - name: Sign image with cosign (keyless, optional)
+        if: ${{ github.event_name != 'pull_request' && success() }}
+        env:
+          COSIGN_EXPERIMENTAL: '1'
+        run: |
+          cosign sign --yes ghcr.io/${{ steps.prep.outputs.owner_lc }}/${{ env.IMAGE_NAME }}@${{ steps.build_push.outputs.digest }} || echo "cosign signing skipped/failed"

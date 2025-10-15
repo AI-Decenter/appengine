@@ -4,6 +4,12 @@ use tower::util::ServiceExt; // for oneshot
 use sha2::{Sha256, Digest};
 use ed25519_dalek::{SigningKey, Signature, Signer};
 use once_cell::sync::OnceCell;
+use sqlx::Connection; // for PgConnection::connect
+use tokio::sync::OnceCell as AsyncOnceCell;
+
+// Perform schema validation once per test process using a direct connection to avoid
+// consuming connections from the shared pool and triggering PoolTimedOut.
+static SCHEMA_OK: AsyncOnceCell<()> = AsyncOnceCell::const_new();
 
 fn init_tracing() {
     static INIT: OnceCell<()> = OnceCell::new();
@@ -17,24 +23,58 @@ fn init_tracing() {
 }
 
 
-// Reuse global shared test pool (migrated once) from crate test_support.
-async fn pool() -> sqlx::Pool<sqlx::Postgres> { init_tracing(); control_plane::test_support::test_pool().await }
-
-async fn ensure_schema(pool: &sqlx::Pool<sqlx::Postgres>) {
-    // Basic presence checks for required tables
-    let required = ["applications", "artifacts", "public_keys", "deployments"];
-    for table in required {
-        // Use EXISTS so we get a stable BOOL type (avoids any INT4/INT8 decode mismatches)
-        let exists: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name=$1)"
-        ).bind(table).fetch_one(pool).await.unwrap();
-        assert!(exists, "required table '{}' missing (run migrations)", table);
+// Prefer a per-test pool for this suite to avoid cross-binary pool contention.
+async fn pool() -> sqlx::Pool<sqlx::Postgres> {
+    init_tracing();
+    // Use a dedicated pool for this test binary
+    std::env::set_var("AETHER_TEST_SHARED_POOL", "0");
+    // Give this suite a slightly larger pool to absorb sequential requests
+    if std::env::var("AETHER_TEST_MAX_CONNS").is_err() {
+        std::env::set_var("AETHER_TEST_MAX_CONNS", "24");
     }
-    // Column-level check for artifacts (extended for Issue 03)
-    let cols: Vec<String> = sqlx::query_scalar(
-        "SELECT column_name FROM information_schema.columns WHERE table_name='artifacts' ORDER BY ordinal_position"
-    ).fetch_all(pool).await.unwrap();
-    for e in ["id","app_id","digest","size_bytes","signature","sbom_url","manifest_url","verified","storage_key","status","created_at"] { assert!(cols.contains(&e.to_string()), "artifacts column '{}' missing", e); }
+    control_plane::test_support::test_pool().await
+}
+
+async fn ensure_schema_once(pool: &sqlx::Pool<sqlx::Postgres>) {
+    if SCHEMA_OK.get().is_some() { return; }
+    SCHEMA_OK.get_or_init(|| async {
+        // Prefer direct PgConnection via DATABASE_URL to avoid using pool connections.
+        if let Ok(url) = std::env::var("DATABASE_URL") {
+            if !url.is_empty() {
+                if let Ok(mut conn) = sqlx::postgres::PgConnection::connect(&url).await {
+                    let required = ["applications", "artifacts", "public_keys", "deployments"];
+                    for table in required {
+                        let exists: bool = sqlx::query_scalar(
+                            "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name=$1)"
+                        ).bind(table).fetch_one(&mut conn).await.expect("schema table exists check");
+                        assert!(exists, "required table '{}' missing (run migrations)", table);
+                    }
+                    let cols: Vec<String> = sqlx::query_scalar(
+                        "SELECT column_name FROM information_schema.columns WHERE table_name='artifacts' ORDER BY ordinal_position"
+                    ).fetch_all(&mut conn).await.expect("fetch artifacts columns");
+                    for e in ["id","app_id","digest","size_bytes","signature","sbom_url","manifest_url","verified","storage_key","status","created_at"] {
+                        assert!(cols.contains(&e.to_string()), "artifacts column '{}' missing", e);
+                    }
+                    return;
+                }
+            }
+        }
+        // Fallback path: use pool to acquire a single connection for checks
+        let mut conn = pool.acquire().await.expect("db acquire for schema checks (fallback)");
+        let required = ["applications", "artifacts", "public_keys", "deployments"];
+        for table in required {
+            let exists: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name=$1)"
+            ).bind(table).fetch_one(&mut *conn).await.expect("schema table exists check");
+            assert!(exists, "required table '{}' missing (run migrations)", table);
+        }
+        let cols: Vec<String> = sqlx::query_scalar(
+            "SELECT column_name FROM information_schema.columns WHERE table_name='artifacts' ORDER BY ordinal_position"
+        ).fetch_all(&mut *conn).await.expect("fetch artifacts columns");
+        for e in ["id","app_id","digest","size_bytes","signature","sbom_url","manifest_url","verified","storage_key","status","created_at"] {
+            assert!(cols.contains(&e.to_string()), "artifacts column '{}' missing", e);
+        }
+    }).await;
 }
 
 fn multipart_body(fields: Vec<(&str, &str)>, file: Option<(&str, Vec<u8>)>) -> (Vec<u8>, String) {
@@ -57,7 +97,7 @@ fn multipart_body(fields: Vec<(&str, &str)>, file: Option<(&str, Vec<u8>)>) -> (
 #[tokio::test]
 #[serial_test::serial]
 async fn upload_missing_digest() {
-    let pool = pool().await; ensure_schema(&pool).await;
+    let pool = pool().await; ensure_schema_once(&pool).await;
     let app = build_router(AppState { db: pool });
     let (artifact_bytes, boundary) = multipart_body(vec![("app_name","demo")], Some(("artifact", b"data".to_vec())));
     let req = Request::builder().method("POST").uri("/artifacts")
@@ -70,7 +110,7 @@ async fn upload_missing_digest() {
 #[tokio::test]
 #[serial_test::serial]
 async fn upload_digest_mismatch() {
-    let pool = pool().await; ensure_schema(&pool).await;
+    let pool = pool().await; ensure_schema_once(&pool).await;
     let app = build_router(AppState { db: pool });
     let data = b"abcdef".to_vec();
     let (artifact_bytes, boundary) = multipart_body(vec![("app_name","demo")], Some(("artifact", data.clone())));
@@ -87,7 +127,7 @@ async fn upload_digest_mismatch() {
 #[tokio::test]
 #[serial_test::serial]
 async fn upload_ok_and_duplicate() {
-    let pool = pool().await; ensure_schema(&pool).await;
+    let pool = pool().await; ensure_schema_once(&pool).await;
     // Clean artifacts
     sqlx::query("DELETE FROM artifacts").execute(&pool).await.ok();
     let app = build_router(AppState { db: pool });
@@ -120,7 +160,7 @@ async fn upload_ok_and_duplicate() {
 #[tokio::test]
 #[serial_test::serial]
 async fn upload_with_verification_true() {
-    let pool = pool().await; ensure_schema(&pool).await;
+    let pool = pool().await; ensure_schema_once(&pool).await;
     sqlx::query("DELETE FROM artifacts").execute(&pool).await.ok();
     sqlx::query("DELETE FROM applications").execute(&pool).await.ok();
     sqlx::query("INSERT INTO applications (name) VALUES ($1)").bind("verifapp").execute(&pool).await.unwrap();
@@ -164,7 +204,7 @@ async fn upload_with_verification_true() {
 #[tokio::test]
 #[serial_test::serial]
 async fn presign_complete_idempotent() {
-    let pool = pool().await; ensure_schema(&pool).await;
+    let pool = pool().await; ensure_schema_once(&pool).await;
     sqlx::query("DELETE FROM artifacts").execute(&pool).await.ok();
     sqlx::query("DELETE FROM applications").execute(&pool).await.ok();
     sqlx::query("INSERT INTO applications (name) VALUES ($1)").bind("presignapp").execute(&pool).await.unwrap();
@@ -211,7 +251,7 @@ async fn upload_unauthorized() {
     // Preserve old value
     let prev = std::env::var("AETHER_API_TOKENS").ok();
     std::env::set_var("AETHER_API_TOKENS", "tok1,tok2");
-    let pool = pool().await; ensure_schema(&pool).await;
+    let pool = pool().await; ensure_schema_once(&pool).await;
     // Build secured router (replicating auth logic from main)
     let tokens: Vec<String> = std::env::var("AETHER_API_TOKENS").unwrap().split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
     let secured = build_router(AppState { db: pool })
@@ -243,7 +283,7 @@ async fn upload_unauthorized() {
 #[tokio::test]
 #[serial_test::serial]
 async fn presign_creates_pending_and_head_not_found_until_complete() {
-    let pool = pool().await; ensure_schema(&pool).await;
+    let pool = pool().await; ensure_schema_once(&pool).await;
     sqlx::query("DELETE FROM artifacts").execute(&pool).await.ok();
     sqlx::query("DELETE FROM applications").execute(&pool).await.ok();
     sqlx::query("INSERT INTO applications (name) VALUES ($1)").bind("pendingapp").execute(&pool).await.unwrap();
@@ -261,8 +301,11 @@ async fn presign_creates_pending_and_head_not_found_until_complete() {
     let head_resp = app.clone().oneshot(head_req).await.unwrap();
     assert_eq!(head_resp.status(), StatusCode::NOT_FOUND);
     // Row status should be pending
-    let status: String = sqlx::query_scalar("SELECT status FROM artifacts WHERE digest=$1").bind(&digest).fetch_one(&pool).await.unwrap();
+    {
+        let mut conn = pool.acquire().await.expect("db acquire for test verify");
+        let status: String = sqlx::query_scalar("SELECT status FROM artifacts WHERE digest=$1").bind(&digest).fetch_one(&mut *conn).await.unwrap();
     assert_eq!(status, "pending");
+    } // drop conn before complete to free pool slot
     // Complete
     let comp_body = serde_json::json!({"app_name":"pendingapp","digest":digest,"size_bytes":42,"signature":null}).to_string();
     let comp_req = Request::builder().method("POST").uri("/artifacts/complete")
@@ -270,7 +313,8 @@ async fn presign_creates_pending_and_head_not_found_until_complete() {
         .body(Body::from(comp_body)).unwrap();
     let comp_resp = app.clone().oneshot(comp_req).await.unwrap();
     assert_eq!(comp_resp.status(), StatusCode::OK);
-    let new_status: String = sqlx::query_scalar("SELECT status FROM artifacts WHERE digest=$1").bind(&digest).fetch_one(&pool).await.unwrap();
+    let mut conn = pool.acquire().await.expect("db acquire for test verify 2");
+    let new_status: String = sqlx::query_scalar("SELECT status FROM artifacts WHERE digest=$1").bind(&digest).fetch_one(&mut *conn).await.unwrap();
     assert_eq!(new_status, "stored");
     // HEAD now OK
     let head2 = Request::builder().method("HEAD").uri(format!("/artifacts/{}", digest)).body(Body::empty()).unwrap();
@@ -284,7 +328,7 @@ async fn complete_requires_presign_when_flag_enabled() {
     // Enable enforcement
     let prev = std::env::var("AETHER_REQUIRE_PRESIGN").ok();
     std::env::set_var("AETHER_REQUIRE_PRESIGN", "1");
-    let pool = pool().await; ensure_schema(&pool).await;
+    let pool = pool().await; ensure_schema_once(&pool).await;
     sqlx::query("DELETE FROM artifacts").execute(&pool).await.ok();
     let app = build_router(AppState { db: pool.clone() });
     let digest = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string();
@@ -318,21 +362,22 @@ async fn complete_requires_presign_when_flag_enabled() {
 #[tokio::test]
 #[serial_test::serial]
 async fn pending_gc_deletes_old_rows() {
-    let pool = pool().await; ensure_schema(&pool).await;
+    let pool = pool().await; ensure_schema_once(&pool).await;
     sqlx::query("DELETE FROM artifacts").execute(&pool).await.ok();
     // Insert artificially old pending row
     let digest = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
     let key = "artifacts/test/app.tar.gz";
+    let mut conn = pool.acquire().await.expect("db acquire for gc test");
     sqlx::query("INSERT INTO artifacts (app_id,digest,size_bytes,signature,sbom_url,manifest_url,verified,storage_key,status,created_at) VALUES (NULL,$1,0,NULL,NULL,NULL,FALSE,$2,'pending', NOW() - INTERVAL '7200 seconds')")
         .bind(digest)
         .bind(key)
-        .execute(&pool).await.unwrap();
+        .execute(&mut *conn).await.unwrap();
     // Force adjust created_at in case default timing interferes
     sqlx::query("UPDATE artifacts SET created_at = NOW() - INTERVAL '7200 seconds' WHERE digest=$1")
         .bind(digest)
-        .execute(&pool).await.ok();
+        .execute(&mut *conn).await.ok();
     let deleted = control_plane::handlers::uploads::run_pending_gc(&pool, 3600).await.unwrap();
     assert_eq!(deleted, 1, "expected one pending row to be deleted");
-    let remain: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM artifacts WHERE status='pending'").fetch_one(&pool).await.unwrap();
+    let remain: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM artifacts WHERE status='pending'").fetch_one(&mut *conn).await.unwrap();
     assert_eq!(remain, 0);
 }

@@ -1,0 +1,48 @@
+name: dev-hot-signature-e2e
+'on':
+  push:
+    branches:
+      - feat/complete-aether-engine-mvp
+  workflow_dispatch:
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install kind & kubectl
+        run: |
+          curl -Lo kind https://kind.sigs.k8s.io/dl/v0.23.0/kind-linux-amd64
+          chmod +x kind && sudo mv kind /usr/local/bin/
+          curl -LO https://storage.googleapis.com/kubernetes-release/release/$(curl -s https://storage.googleapis.com/kubernetes-release/release/stable.txt)/bin/linux/amd64/kubectl
+          chmod +x kubectl && sudo mv kubectl /usr/local/bin/
+      - name: Create kind cluster
+        run: kind create cluster --wait 60s
+      - name: Build control-plane
+        run: cargo build --release -p control-plane
+      - name: Run control-plane (background)
+        run: | 
+          ./target/release/control-plane &
+          echo $! > cp.pid
+      - name: Wait for API up
+        run: |
+          for i in {1..30}; do curl -sf localhost:8080/healthz && exit 0 || sleep 1; done; exit 1
+      - name: Apply RBAC (dev-hot)
+        run: kubectl apply -f k8s/dev-hot-rbac.yaml || true
+      - name: Run signature E2E
+        env:
+          AETHER_API_BASE: http://localhost:8080
+        run: scripts/dev-hot-signature-e2e.sh
+      - name: Dump fetcher logs on failure
+        if: failure()
+        run: |
+          POD=$(kubectl get pods -l app=demo-app -o jsonpath='{.items[0].metadata.name}' || true)
+          kubectl logs "$POD" -c fetcher || true
+      - name: Cleanup
+        if: always()
+        run: |
+          kill $(cat cp.pid) 2>/dev/null || true
+          kind delete cluster || true

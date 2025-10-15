@@ -9,8 +9,8 @@ fn deploy_generates_sbom_and_signature_when_key_present() {
     let root = tmp.path();
     fs::write(root.join("package.json"), "{\n  \"name\": \"demo\", \n  \"version\": \"1.2.3\"\n}").unwrap();
     fs::write(root.join("index.js"), "console.log('hi')").unwrap();
-    // 32-byte (64 hex chars) deterministic key
-    let key = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"; // 32 bytes of 0xaa
+    // 32-byte (64 hex chars) deterministic key (all 0xaa)
+    let key = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"; // 32 bytes (0xaa * 32) in hex
     bin().current_dir(root)
         .env("AETHER_SIGNING_KEY", key)
         .env("XDG_CACHE_HOME", root)
@@ -29,6 +29,9 @@ fn deploy_generates_sbom_and_signature_when_key_present() {
     let sig_content = fs::read_to_string(&sig).unwrap();
     assert_eq!(sig_content.len(), 128, "ed25519 signature hex length");
     let sbom_content = fs::read_to_string(&sbom).unwrap();
-    assert!(sbom_content.contains("\"schema\":"));
+    // Accept either legacy (schema field) or CycloneDX (bomFormat)
+    let has_legacy_schema = sbom_content.contains("\"schema\":");
+    let has_cyclonedx = sbom_content.contains("\"bomFormat\": \"CycloneDX\"");
+    assert!(has_legacy_schema || has_cyclonedx, "SBOM should be legacy or CycloneDX format");
     assert!(sbom_content.contains("demo"));
 }

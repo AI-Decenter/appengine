@@ -1,3 +1,4 @@
+#![cfg(feature = "s3")]
 use axum::{body::Body, http::Request};
 use control_plane::{build_router, AppState, db::init_db};
 use tower::util::ServiceExt;
@@ -14,6 +15,7 @@ async fn pool() -> sqlx::Pool<sqlx::Postgres> {
 #[serial_test::serial]
 async fn s3_presign_complete_with_remote_hash() {
     if std::env::var("MINIO_TEST").ok().as_deref() != Some("1") { return; } // skip silently
+    if std::env::var("AETHER_STORAGE_MODE").unwrap_or_default().to_lowercase() != "s3" { eprintln!("skipping: AETHER_STORAGE_MODE != s3"); return; }
     // Enable remote hash verification for small object (data length < threshold)
     std::env::set_var("AETHER_VERIFY_REMOTE_HASH", "true");
     std::env::set_var("AETHER_REMOTE_HASH_MAX_BYTES", "1048576"); // 1MB

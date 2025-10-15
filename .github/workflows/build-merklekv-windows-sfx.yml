@@ -1,0 +1,49 @@
+name: Build MerkleKV Mobile (Windows SFX)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    tags: [ 'merklekv-*', 'merklekv-v*' ]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout appengine
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Clone MerkleKV-Mobile
+        shell: bash
+        run: |
+          git clone --depth=1 https://github.com/AI-Decenter/MerkleKV-Mobile.git
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Ensure 7-Zip present
+        shell: powershell
+        run: |
+          if (-not (Test-Path "$env:ProgramFiles\7-Zip\7zS.sfx") -and -not (Test-Path "$env:ProgramFiles\7-Zip\7z.sfx")) {
+            choco install 7zip -y
+          }
+
+      - name: Build and package SFX
+        shell: powershell
+        working-directory: MerkleKV-Mobile
+        run: |
+          if (-not (Test-Path .\scripts\windows\make-sfx.ps1)) {
+            throw 'Packaging script not found in MerkleKV-Mobile/scripts/windows/make-sfx.ps1'
+          }
+          ./scripts/windows/make-sfx.ps1 -Output "$pwd\apps\flutter_demo\releases\MerkleKV-Mobile.exe"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MerkleKV-Mobile-windows-sfx
+          path: MerkleKV-Mobile/apps/flutter_demo/releases/MerkleKV-Mobile.exe
+          if-no-files-found: error

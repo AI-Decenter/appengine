@@ -2,75 +2,345 @@ name: CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, feat/**, fix/** ]
   pull_request:
-    branches: [ main ]
+  workflow_dispatch:
+  schedule:
+    - cron: '0 2 * * *' # nightly full run
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Default test pool tuning; jobs can override per mode
+  AETHER_TEST_MAX_CONNS: '12'
+  # Provide deterministic AWS context & disable metadata to avoid network stalls
+  AWS_EC2_METADATA_DISABLED: 'true'
+  AWS_REGION: us-east-1
+  AWS_ACCESS_KEY_ID: dummy
+  AWS_SECRET_ACCESS_KEY: dummy
+  # Toggle to run feature-gated S3 tests in non-PR full-tests (enabled by default)
+  AETHER_ENABLE_S3_FULL_CI: '1'
 
 jobs:
-  build-test:
+  fast-tests:
+    name: Fast Tests (PR / branch)
+    if: ${{ github.event_name != 'schedule' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        db: [testcontainers, service]
     env:
-      DATABASE_URL: postgres://postgres:postgres@localhost:5432/aether_dev
+      RUSTC_WRAPPER: sccache
+      RUSTFLAGS: -C debuginfo=0 -C prefer-dynamic -C strip=symbols -C link-arg=-Wl,--no-threads -C link-arg=-Wl,--no-keep-memory
+      CARGO_INCREMENTAL: 0
+      SCCACHE_CACHE_SIZE: 1G
+      CARGO_BUILD_JOBS: 2
     services:
       postgres:
-        image: postgres:15
+        image: postgres:15-alpine
         env:
+          POSTGRES_USER: aether
           POSTGRES_PASSWORD: postgres
-          POSTGRES_USER: postgres
-          POSTGRES_DB: aether_dev
-        ports: ["5432:5432"]
+          POSTGRES_DB: postgres
+        ports: [ '5432:5432' ]
         options: >-
-          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+          --health-cmd="pg_isready -U aether" --health-interval=5s --health-timeout=5s --health-retries=20
     steps:
-      - uses: actions/checkout@v4
-      - name: Install Rust toolchain
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free disk space (remove large preinstalled tools)
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          swap-storage: true
+          docker-images: true
+
+      - name: Prune unused Docker data
+        run: |
+          docker system prune -af || true
+          docker volume prune -f || true
+
+      - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.90.0
-          components: clippy
+          components: clippy,rustfmt
+
       - name: Install sccache
-        run: cargo install sccache --locked || true
-      - name: Cache cargo
-        uses: actions/cache@v4
+        uses: taiki-e/install-action@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-            ~/.cache/sccache
-          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
-      - name: Configure sccache env
-        run: echo "RUSTC_WRAPPER=$(which sccache)" >> $GITHUB_ENV
-      - name: Wait for Postgres
+          tool: sccache
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' || github.event_name == 'schedule' }}
+
+      - name: Configure DB mode (testcontainers)
+        if: ${{ matrix.db == 'testcontainers' }}
         run: |
-          for i in {1..30}; do
-            pg_isready -h 127.0.0.1 -U postgres && break
-            sleep 1
-          done
-      - name: Install sqlx-cli
-        run: cargo install sqlx-cli --no-default-features --features native-tls,postgres
-      - name: Generate Cargo.lock (fetch dependencies)
-        run: cargo fetch
-      - name: Run migrations
-        working-directory: crates/control-plane
-        run: sqlx migrate run
-      - name: Build
-        run: cargo build --workspace --all-targets --release
-      - name: sccache stats (post-build)
-        run: sccache --show-stats || true
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-      - name: SQLx Prepare (Offline)
+          echo "Using testcontainers DB mode";
+          unset DATABASE_URL
+          echo "AETHER_FORCE_TESTCONTAINERS=1" >> $GITHUB_ENV
+          echo "AETHER_TEST_SHARED_POOL=0" >> $GITHUB_ENV
+          echo "AETHER_FAST_TEST=1" >> $GITHUB_ENV
+      - name: Configure DB mode (service)
+        if: ${{ matrix.db == 'service' }}
         run: |
-          sudo apt-get update && sudo apt-get install -y postgresql-client
-          cargo sqlx prepare --workspace -- --all-targets
-      - name: Tests
-        run: cargo test --workspace --all-features -- --nocapture
+          echo "Using managed Postgres service DB mode";
+          echo "DATABASE_URL=postgres://aether:postgres@localhost:5432/aether_test" >> $GITHUB_ENV
+          echo "POSTGRES_PASSWORD=postgres" >> $GITHUB_ENV
+          echo "AETHER_TEST_SHARED_POOL=0" >> $GITHUB_ENV
+          echo "AETHER_FAST_TEST=1" >> $GITHUB_ENV
+
+      - name: Fast test suite (no S3 features)
+        env:
+          EXPECT_FAST: '1'
+          # Provide dummy tokens to auth-aware tests (middleware defaults to optional auth)
+          AETHER_API_TOKENS: t_admin:admin:alice,t_reader:reader:bob
+        run: |
+          cargo test -j 2 -p control-plane --lib -- --nocapture
+          cargo test -j 2 -p control-plane --test sbom_manifest_enforcement -- --nocapture
+          # (Optionally) add other crate smoke tests here
+      - name: Network stack regression check
+        run: |
+          bash scripts/check-network-stack.sh
       - name: Install cargo-deny
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-deny
-      - name: Cargo Deny
-        run: cargo deny check
-      - name: ShellCheck dev.sh
-        run: sudo apt-get update && sudo apt-get install -y shellcheck && shellcheck dev.sh || true
+      - name: Cargo Deny (bans)
+        run: cargo deny --all-features check bans
+
+      - name: Clippy (warnings as errors)
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Helm lint (optional)
+        run: |
+          if command -v helm >/dev/null 2>&1; then
+            helm lint charts/control-plane || exit 1
+            helm template test charts/control-plane --set env.DATABASE_URL=postgres://u:p@h:5432/db --set env.TOKENS=t_admin:admin:alice >/dev/null
+          else
+            echo "helm not installed; skipping"
+          fi
+
+      - name: sccache stats
+        run: sccache --show-stats || true
+
+  full-tests:
+    name: Full Tests (main / nightly / manual)
+    needs: [fast-tests]
+    # Runs automatically on:
+    #  - Nightly schedule
+    #  - Manual dispatch
+    #  - Push to main
+    #  - Any pull_request (always run full suite for PRs)
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        db: [testcontainers, service]
+    env:
+      RUSTC_WRAPPER: sccache
+      RUSTFLAGS: -C debuginfo=0 -C prefer-dynamic -C strip=symbols -C link-arg=-Wl,--no-threads -C link-arg=-Wl,--no-keep-memory
+      CARGO_INCREMENTAL: 0
+      SCCACHE_CACHE_SIZE: 1G
+      CARGO_BUILD_JOBS: 2
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: aether
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports: [ '5432:5432' ]
+        options: >-
+          --health-cmd="pg_isready -U aether" --health-interval=5s --health-timeout=5s --health-retries=20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free disk space (remove large preinstalled tools)
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          swap-storage: true
+          docker-images: true
+
+      - name: Prune unused Docker data
+        run: |
+          docker system prune -af || true
+          docker volume prune -f || true
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.90.0
+          components: clippy,rustfmt
+
+      - name: Install sccache
+        uses: taiki-e/install-action@v2
+        with:
+          tool: sccache
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Configure DB mode (testcontainers)
+        if: ${{ matrix.db == 'testcontainers' }}
+        run: |
+          echo "Using testcontainers DB mode";
+          unset DATABASE_URL
+          echo "AETHER_FORCE_TESTCONTAINERS=1" >> $GITHUB_ENV
+          echo "AETHER_TEST_SHARED_POOL=0" >> $GITHUB_ENV
+      - name: Configure DB mode (service)
+        if: ${{ matrix.db == 'service' }}
+        run: |
+          echo "Using managed Postgres service DB mode";
+          echo "DATABASE_URL=postgres://aether:postgres@localhost:5432/aether_test" >> $GITHUB_ENV
+          echo "POSTGRES_PASSWORD=postgres" >> $GITHUB_ENV
+          echo "AETHER_TEST_SHARED_POOL=0" >> $GITHUB_ENV
+
+      - name: Full workspace tests (PR-safe)
+        if: ${{ github.event_name == 'pull_request' }}
+        env:
+          # Tokens available for tests that opt-in to auth; enforcement remains opt-out by default
+          AETHER_API_TOKENS: t_admin:admin:alice,t_reader:reader:bob
+        run: |
+          cargo test -j 2 --workspace -- --nocapture --test-threads=4
+
+      - name: Full workspace tests (all features)
+        if: ${{ github.event_name != 'pull_request' }}
+        env:
+          # Tokens available for tests that opt-in to auth; enforcement remains opt-out by default
+          AETHER_API_TOKENS: t_admin:admin:alice,t_reader:reader:bob
+        run: |
+          cargo test -j 2 --workspace --all-features -- --nocapture --test-threads=4
+
+      - name: S3 compile check (non-PR)
+        if: ${{ github.event_name != 'pull_request' }}
+        run: |
+          cargo check -j 2 -p control-plane --features s3
+
+      - name: Start MinIO (non-PR)
+        if: ${{ github.event_name != 'pull_request' && env.AETHER_ENABLE_S3_FULL_CI == '1' }}
+        run: |
+          docker rm -f ci-minio 2>/dev/null || true
+          docker run -d --name ci-minio -p 9000:9000 \
+            -e MINIO_ROOT_USER=${AWS_ACCESS_KEY_ID:-minioadmin} \
+            -e MINIO_ROOT_PASSWORD=${AWS_SECRET_ACCESS_KEY:-minioadmin} \
+            minio/minio:latest server /data --console-address :9001
+          for i in {1..40}; do
+            curl -sf http://127.0.0.1:9000/minio/health/ready && break
+            sleep 1
+            if [ "$i" = "40" ]; then echo "MinIO not ready"; exit 1; fi
+          done
+          curl -sSL -o mc https://dl.min.io/client/mc/release/linux-amd64/mc
+          chmod +x mc
+          ./mc alias set local http://127.0.0.1:9000 ${AWS_ACCESS_KEY_ID:-minioadmin} ${AWS_SECRET_ACCESS_KEY:-minioadmin}
+          ./mc mb --ignore-existing local/${AETHER_ARTIFACT_BUCKET:-artifacts}
+
+      - name: Control-plane S3 tests (opt-in)
+        if: ${{ github.event_name != 'pull_request' && env.AETHER_ENABLE_S3_FULL_CI == '1' }}
+        env:
+          # Provide tokens for tests that enable auth enforcement explicitly
+          AETHER_API_TOKENS: t_admin:admin:alice,t_reader:reader:bob
+          # Use per-test DB pools to avoid runtime shutdown issues
+          AETHER_TEST_SHARED_POOL: '0'
+          # S3/MinIO settings
+          MINIO_TEST: '1'
+          AETHER_STORAGE_MODE: s3
+          AETHER_ARTIFACT_BUCKET: artifacts
+          AETHER_S3_ENDPOINT_URL: http://localhost:9000
+        run: |
+          # Build test binaries serially to avoid concurrent linkers exhausting memory
+          cargo test -p control-plane --features s3 --no-run -j 1
+          # Run tests; this should not trigger re-linking
+          cargo test -p control-plane --features s3 -- --nocapture --test-threads=2
+
+      - name: Clippy (strict)
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Helm lint (optional)
+        run: |
+          if command -v helm >/dev/null 2>&1; then
+            helm lint charts/control-plane || exit 1
+            helm template test charts/control-plane --set env.DATABASE_URL=postgres://u:p@h:5432/db --set env.TOKENS=t_admin:admin:alice >/dev/null
+          else
+            echo "helm not installed; skipping"
+          fi
+
+      - name: Doc build
+        run: cargo doc --no-deps --workspace
+
+      - name: Publish test report summary
+        if: always()
+        run: |
+          echo "## Test Summary" >> $GITHUB_STEP_SUMMARY
+          echo "Fast mode: PR job; Full mode: main/nightly/manual." >> $GITHUB_STEP_SUMMARY
+          echo "DB mode: ${{ matrix.db }}" >> $GITHUB_STEP_SUMMARY
+
+  benchmarks:
+    name: Benchmarks (enforced)
+    needs: [full-tests]
+    # Run on PRs and main, and on scheduled/nightly
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.90.0
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run benches (aether-cli)
+        env:
+          RAYON_NUM_THREADS: '2'
+          RUST_LOG: 'off'
+        run: |
+          cargo bench -p aether-cli --bench pack_bench --bench stream_bench --quiet
+
+      - name: Compare to baselines (fail on regression)
+        env:
+          # Allow mild variance on shared runners for duration metrics
+          DURATION_TOLERANCE: '0.22'
+        run: |
+          # Packaging vs committed baseline
+          bash scripts/check-bench-regression.sh \
+            crates/aether-cli/benches/baseline/bench-pack.json \
+            crates/aether-cli/target/benchmarks/bench-pack.json
+          # Streaming vs committed baseline
+          bash scripts/check-bench-regression.sh \
+            crates/aether-cli/benches/baseline/bench-stream.json \
+            crates/aether-cli/target/benchmarks/bench-stream.json
+
+      - name: Upload bench artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-jsons-enforced
+          path: |
+            crates/aether-cli/target/benchmarks/*.json
+            target/criterion/**

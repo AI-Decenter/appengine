@@ -9,9 +9,9 @@ set -euo pipefail
 #   ./dev.sh help        # show help
 #   ./dev.sh clean       # remove local ephemeral containers
 #   ./dev.sh k8s-start   # ensure microk8s + namespace + basic storage class
-#   ./dev.sh deploy-sample <app-name> <artifact-path|dir>  # package (if dir) & deploy test node app
+#   ./dev.sh deploy-sample <app-name> [artifact-path|dir]  # package (if dir) & deploy sample (generates sample if path omitted)
 #   ./dev.sh hot-upload <app-name> <dir>   # package directory -> upload to MinIO -> print digest & URL
-#   ./dev.sh hot-patch <app-name> <digest> # patch k8s deployment annotation to trigger sidecar reload
+#   ./dev.sh hot-patch <app-name> <digest> # patch k8s deployment annotation to trigger sidecar fetch (no full restart required)
 
 PROJECT_NAME="AetherEngine"
 POSTGRES_CONTAINER="aether-postgres"
@@ -299,7 +299,7 @@ Commands:
   clean              Remove ephemeral local service containers
   k8s-start          Ensure microk8s ready + namespace + addons
   db-start            Ensure Postgres container (same as make db-start)
-  deploy-sample APP PATH   Deploy sample Node app (PATH .tar.gz or directory)
+  deploy-sample APP [PATH] Deploy sample Node app (PATH .tar.gz or directory; if omitted creates example under examples/sample-node)
   hot-upload APP DIR       Package DIR -> upload to MinIO -> output digest + URL
   hot-patch APP DIGEST     Patch Deployment annotation (aether.dev/digest) to trigger fetch sidecar
   help               Show this help
@@ -352,12 +352,40 @@ upload_artifact_minio() {
   echo "$digest|s3://$ARTIFACT_BUCKET/$key|http://127.0.0.1:9000/${ARTIFACT_BUCKET}/${key}"
 }
 
+create_sample_if_missing() {
+  local dir=$1
+  if [ -d "$dir" ]; then return 0; fi
+  mkdir -p "$dir"
+  cat >"$dir/index.js" <<'JS'
+const http = require('http');
+const start = Date.now();
+let counter = 0;
+setInterval(()=>{ counter++; }, 1000);
+http.createServer((req,res)=>{
+  res.setHeader('Content-Type','application/json');
+  res.end(JSON.stringify({msg:'hello from sample app', uptime: (Date.now()-start)/1000, counter }));
+}).listen(3000, ()=> console.log('Sample app listening on :3000'));
+JS
+  cat >"$dir/package.json" <<'PKG'
+{
+  "name": "aether-sample-app",
+  "version": "0.0.1",
+  "private": true,
+  "main": "index.js"
+}
+PKG
+}
+
 deploy_sample() {
   local app=$1; shift || true
   local path=${1:-}
-  if [ -z "$app" ] || [ -z "$path" ]; then err "Usage: dev.sh deploy-sample <app-name> <artifact-path|dir>"; exit 1; fi
+  if [ -z "$app" ]; then err "Usage: dev.sh deploy-sample <app-name> [artifact-path|dir]"; exit 1; fi
   ensure_microk8s
   sudo microk8s kubectl create namespace "$K8S_NAMESPACE" --dry-run=client -o yaml | sudo microk8s kubectl apply -f - >/dev/null 2>&1 || true
+  if [ -z "$path" ]; then
+    path="examples/sample-node"
+    create_sample_if_missing "$path"
+  fi
   local artifact="$path"
   if [ -d "$path" ]; then
     artifact="/tmp/${app}-dev-artifact.tar.gz"
@@ -386,10 +414,19 @@ spec:
     metadata:
       labels:
         app_name: ${app}
+        aether.dev/app: "${app}"
+      annotations:
+        aether.dev/digest: "${digest}"
     spec:
       volumes:
         - name: workspace
           emptyDir: {}
+        - name: podinfo
+          downwardAPI:
+            items:
+              - path: annotations
+                fieldRef:
+                  fieldPath: metadata.annotations
       initContainers:
         - name: fetch
           image: ${FETCHER_IMAGE}
@@ -406,16 +443,32 @@ spec:
           volumeMounts:
             - name: workspace
               mountPath: /workspace
+          ports:
+            - containerPort: 3000
         - name: fetcher-sidecar
           image: ${FETCHER_IMAGE}
           command: ["/bin/sh","-c"]
-          args: ["while true; do cur=\"$(wget -q -O - ${url} | sha256sum | awk '{print $1}')\"; if [ \"$cur\" != \"$digest\" ]; then echo updating && wget -q -O - ${url} | tar -xz -C /workspace && digest=$cur; fi; sleep 10; done"]
+          args: ["current='${digest}'; while true; do nd=$(grep '^aether.dev/digest=' /etc/podinfo/annotations | cut -d'=' -f2 | tr -d '"'); if [ -n \"$nd\" ] && [ \"$nd\" != \"$current\" ]; then echo '[fetcher] new digest' $nd; wget -q -O - http://127.0.0.1:9000/${ARTIFACT_BUCKET}/artifacts/${app}/$nd/app.tar.gz | tar -xz -C /workspace && current=$nd; fi; sleep 5; done"]
           volumeMounts:
             - name: workspace
               mountPath: /workspace
+            - name: podinfo
+              mountPath: /etc/podinfo
 YAML
-  sudo microk8s kubectl apply -f /tmp/${app}-deploy.yaml
-  log "Deployed ${app} digest=${digest}"
+  sudo microk8s kubectl apply -f /tmp/${app}-deploy.yaml >/dev/null
+  log "Applied deployment ${app} digest=${digest}. Waiting for Pod Running..."
+  local waited=0
+  while [ $waited -lt 60 ]; do
+    local phase
+    phase=$(sudo microk8s kubectl get pods -n "$K8S_NAMESPACE" -l app_name="$app" -o jsonpath='{.items[0].status.phase}' 2>/dev/null || true)
+    if [ "$phase" = "Running" ]; then
+      log "Deployment ${app} pod running (digest=${digest})."
+      break
+    fi
+    sleep 2; waited=$((waited+2))
+  done
+  if [ $waited -ge 60 ]; then warn "Timed out waiting for pod to be Running"; fi
+}
 }
 
 hot_upload() {
@@ -432,8 +485,9 @@ hot_patch() {
   local digest=$1
   if [ -z "$app" ] || [ -z "$digest" ]; then err "Usage: dev.sh hot-patch <app-name> <digest>"; exit 1; fi
   ensure_microk8s
-  sudo microk8s kubectl patch deployment "$app" -n "$K8S_NAMESPACE" -p "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"aether.dev/digest\":\"$digest\"}}}}}" || err "Patch failed"
-  log "Patched deployment ${app} with new digest=${digest}"
+  sudo microk8s kubectl patch deployment "$app" -n "$K8S_NAMESPACE" \
+    -p "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"aether.dev/digest\":\"$digest\"}}}}}" >/dev/null || err "Patch failed"
+  log "Patched deployment ${app} new digest=${digest}. Sidecar will fetch within ~5s."
 }
 
 main "$@"

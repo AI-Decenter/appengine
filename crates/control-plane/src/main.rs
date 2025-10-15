@@ -63,14 +63,22 @@ async fn main() -> anyhow::Result<()> {
                     let mut guard = rate_state.lock().unwrap();
                     let entry = guard.entry(ip).or_insert((0, std::time::Instant::now() + Duration::from_secs(60)));
                     if std::time::Instant::now() > entry.1 { *entry = (0, std::time::Instant::now() + Duration::from_secs(60)); }
-                    if entry.0 >= 60 { return Response::builder().status(429).body(Body::from("rate_limit")).unwrap(); }
+                    if entry.0 >= 60 {
+                        tracing::warn!(client_ip=%ip, "rate_limit.429");
+                        return Response::builder().status(429).body(Body::from("rate_limit")).unwrap();
+                    }
                     entry.0 += 1;
                 }
             }
             if !exempt && !auth_tokens.is_empty() {
                 let provided = req.headers().get("authorization").and_then(|v| v.to_str().ok()).unwrap_or("");
                 let valid = auth_tokens.iter().any(|tok| provided == format!("Bearer {tok}"));
-                if !valid { return Response::builder().status(401).body(Body::from("unauthorized")).unwrap(); }
+                if !valid {
+                    static UNAUTH_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+                    let n = UNAUTH_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if n.is_multiple_of(10) { tracing::warn!("auth.unauthorized.legacy_path"); }
+                    return Response::builder().status(401).body(Body::from("unauthorized")).unwrap();
+                }
             }
             let pool = &state_for_pool.db;
             let size = pool.size() as i64;
